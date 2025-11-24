@@ -206,17 +206,26 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# --- SeisMambaKAN ---
-data/
-logs/
+# --- SeisMambaKAN project ---
+
+# Experiments (All logs, checkpoints, temp configs inside experiments)
 experiments/
-checkpoints/
+
+# Final Saved Models (Showroom in root)
 saved_models/
+
+# Data
+data/
 *.h5
 *.hdf5
 *.csv
-config.yaml
+
+# Python cache
 __pycache__/
 *.pyc
-.ipynb_checkpoints
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS garbage
 .DS_Store
