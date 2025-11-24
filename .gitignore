@@ -205,3 +205,18 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# --- SeisMambaKAN ---
+data/
+logs/
+experiments/
+checkpoints/
+saved_models/
+*.h5
+*.hdf5
+*.csv
+config.yaml
+__pycache__/
+*.pyc
+.ipynb_checkpoints
+.DS_Store
