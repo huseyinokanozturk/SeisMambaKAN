@@ -1,0 +1,28 @@
+# configs/config.yaml
+
+data:
+  mode: "all"            # all / sample
+  sample_size: 1300      # mode=sample için toplam örnek sayısı
+  eq_ratio: 0.75         # sample modunda depremlerin oranı
+  use_noise: true        # noise dahil edilsin mi
+
+  sampling_rate_hz: 100
+  window_seconds: 60
+  n_channels: 3
+
+split:
+  train: 0.8
+  val: 0.1
+  test: 0.1
+
+cleaning:
+  min_ps_seconds: 0.5
+  max_ps_seconds: 35.0
+  allow_missing_s: false
+  drop_if_missing_p: true
+  window_samples:
+    min: 0
+    max: 6000
+
+preprocessing:
+  normalization: "zscore"   # "zscore" veya "maxabs"

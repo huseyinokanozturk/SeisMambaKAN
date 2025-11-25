@@ -1,0 +1,27 @@
+# configs/paths.yaml
+
+# Data Paths
+data:
+  raw_csv_dir: "data/raw/csv"
+  raw_hdf5_dir: "data/raw/hdf5"
+
+  stead:
+    noise_chunks: ["chunk1"]
+    eq_chunks: ["chunk2", "chunk3", "chunk4", "chunk5", "chunk6"]
+
+processed:
+  all:
+    train_dir: "data/processed/all/train"
+    val_dir:   "data/processed/all/val"
+    test_dir:  "data/processed/all/test"
+
+  sample:
+    train_dir: "data/processed/sample/train"
+    val_dir:   "data/processed/sample/val"
+    test_dir:  "data/processed/sample/test"
+
+webdataset:
+  shard_size: 2048                 # her .tar dosyasındaki örnek sayısı
+  train_pattern: "train_{:06d}.tar"
+  val_pattern:   "val_{:06d}.tar"
+  test_pattern:  "test_{:06d}.tar"

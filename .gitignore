@@ -206,19 +206,28 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# --- SeisMambaKAN project ---
+# --- SeisMambaKAN Project ---
 
-# Experiments (All logs, checkpoints, temp configs inside experiments)
-experiments/
-
-# Final Saved Models (Showroom in root)
-saved_models/
-
-# Data
+# Data (ham + işlenmiş)
 data/
+data/raw/
+data/processed/
+*.tar
+*.npy
+*.json
+
+# HDF5 (ham STEAD chunklar)
 *.h5
 *.hdf5
+
+# CSV (metadata dosyaları)
 *.csv
+
+# Experiments: logs, checkpoints, tensorboard, temp configs
+experiments/
+
+# Saved models
+saved_models/
 
 # Python cache
 __pycache__/
@@ -227,5 +236,14 @@ __pycache__/
 # Jupyter
 .ipynb_checkpoints/
 
-# OS garbage
+# OS files
 .DS_Store
+Thumbs.db
+
+# VSCode
+.vscode/
+
+# PyTorch Lightning / WandB / TensorBoard logs (ileride kullanırsan)
+lightning_logs/
+wandb/
+runs/
