@@ -1,27 +1,45 @@
 # configs/paths.yaml
 
-# Data Paths
+# Data Paths Configuration
 data:
+  # Directory containing raw CSV files
   raw_csv_dir: "data/raw/csv"
+  # Directory containing raw HDF5 files
   raw_hdf5_dir: "data/raw/hdf5"
 
+  # STEAD dataset chunk configuration
   stead:
+    # Noise data chunks
     noise_chunks: ["chunk1"]
+    # Earthquake data chunks
     eq_chunks: ["chunk2", "chunk3", "chunk4", "chunk5", "chunk6"]
 
+# Processed data directory structure
 processed:
+  # Full dataset directories
   all:
+    # Training data directory
     train_dir: "data/processed/all/train"
+    # Validation data directory
     val_dir:   "data/processed/all/val"
+    # Test data directory
     test_dir:  "data/processed/all/test"
 
+  # Sample dataset directories
   sample:
+    # Training data directory (sample)
     train_dir: "data/processed/sample/train"
+    # Validation data directory (sample)
     val_dir:   "data/processed/sample/val"
+    # Test data directory (sample)
     test_dir:  "data/processed/sample/test"
 
+# WebDataset configuration
 webdataset:
-  shard_size: 2048                 # her .tar dosyasındaki örnek sayısı
+  shard_size: 2048                 # Number of samples per .tar file
+  # Training data .tar file naming pattern
   train_pattern: "train_{:06d}.tar"
+  # Validation data .tar file naming pattern
   val_pattern:   "val_{:06d}.tar"
+  # Test data .tar file naming pattern
   test_pattern:  "test_{:06d}.tar"

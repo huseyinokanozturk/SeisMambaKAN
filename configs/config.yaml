@@ -1,28 +1,196 @@
-# configs/config.yaml
+# =====================================================================
+# Global configuration for SeisMambaKAN
+# =====================================================================
 
+# -----------------------------
+# DATASET CONFIGURATION
+# -----------------------------
 data:
-  mode: "all"            # all / sample
-  sample_size: 1300      # mode=sample için toplam örnek sayısı
-  eq_ratio: 0.75         # sample modunda depremlerin oranı
-  use_noise: true        # noise dahil edilsin mi
+  # Dataset mode: "all" uses the full cleaned dataset,
+  # "sample" uses a smaller subset mainly for debugging and smoke tests.
+  mode: "sample"              # "all" or "sample"
 
-  sampling_rate_hz: 100
-  window_seconds: 60
-  n_channels: 3
+  # Total number of samples to draw when mode == "sample".
+  sample_size: 1300
 
+  # Fraction of earthquake samples within the sample subset.
+  # For example, eq_ratio=0.75 → 75% earthquakes, 25% noise.
+  eq_ratio: 0.75
+
+  # Whether to include noise traces in the dataset at all.
+  use_noise: true
+
+  # Raw signal properties (STEAD default)
+  sampling_rate_hz: 100    # STEAD is 100 Hz
+  window_seconds: 60       # 60 s window → 6000 samples
+  n_channels: 3            # typically (E, N, Z) or similar
+
+# -----------------------------
+# DATA SPLIT CONFIGURATION
+# -----------------------------
 split:
+  # Fractions for train/validation/test splits.
   train: 0.8
   val: 0.1
   test: 0.1
 
+# -----------------------------
+# CLEANING / QUALITY FILTERS
+# -----------------------------
 cleaning:
+  # Acceptable P–S time difference in seconds.
   min_ps_seconds: 0.5
   max_ps_seconds: 35.0
+
+  # Whether to allow missing S picks (future extension).
   allow_missing_s: false
+
+  # Whether to drop records with missing P picks.
   drop_if_missing_p: true
+
+  # Valid range for P/S arrival sample indices within the window.
   window_samples:
     min: 0
     max: 6000
 
+# -----------------------------
+# PREPROCESSING (ON WAVEFORM)
+# -----------------------------
 preprocessing:
-  normalization: "zscore"   # "zscore" veya "maxabs"
+  # Only amplitude normalization is applied.
+  # STEAD already performed detrend + bandpass filtering.
+  # Options: "zscore", "maxabs", "none"
+  normalization: "zscore"
+
+# =====================================================================
+# LABEL GENERATION CONFIGURATION
+# =====================================================================
+labels:
+  # Total time steps used for label generation (should match window length).
+  total_length: 6000
+
+  # Detection head target:
+  # Typically a wider window around P and/or between P and S.
+  detection:
+    # Label type for detection head (currently "gaussian" or "binary" planned).
+    type: "gaussian"
+
+    # Standard deviation of the Gaussian (in samples) used for detection target.
+    sigma_samples: 10.0
+
+    # Peak value of the Gaussian target.
+    peak_value: 1.0
+
+    # Optional margin for expanding the detection region around P/S.
+    # This can be used for binary-style targets (e.g., 1 within ±margin).
+    margin_samples: 5
+
+  # Phase picking heads for P and S phases.
+  phase:
+    # P-phase Gaussian label parameters.
+    p_sigma_samples: 10.0
+    # S-phase Gaussian label parameters.
+    s_sigma_samples: 10.0
+
+    # Peak value for both P and S Gaussian labels.
+    peak_value: 1.0
+
+  # How to represent noise traces (without P/S picks).
+  noise_policy:
+    # Index values used when P or S is not available (e.g., noise traces).
+    # -1 means "no valid pick".
+    p_index: -1
+    s_index: -1
+
+# =====================================================================
+# DATA AUGMENTATION CONFIGURATION
+# =====================================================================
+augmentation:
+  # Global switch to enable/disable all augmentations.
+  enable: true
+
+  # -------------------------
+  # Random time shift
+  # -------------------------
+  random_shift:
+    # Probability of applying a random temporal shift to the trace.
+    prob: 0.75
+    # Maximum absolute shift in samples (both positive and negative).
+    max_shift_samples: 30
+
+  # -------------------------
+  # Additive noise
+  # -------------------------
+  additive_noise:
+    # Probability of adding Gaussian noise to the waveform.
+    prob: 0.5
+    # Standard deviation of the noise relative to the normalized signal.
+    std: 0.05
+
+  # -------------------------
+  # Amplitude scaling
+  # -------------------------
+  amplitude_scale:
+    # Probability of applying random global scaling to the waveform.
+    prob: 0.3
+    # Range for the random scaling factor.
+    min: 0.9
+    max: 1.1
+
+  # -------------------------
+  # Channel dropout
+  # -------------------------
+  channel_dropout:
+    # Probability of dropping one or more channels (set to zero).
+    prob: 0.1
+    # Possible numbers of channels to drop, randomly chosen from this list.
+    # Example: [1] → always drop exactly one channel when triggered.
+    num_channels_choices: [1]
+
+  # -------------------------
+  # Secondary event injection
+  # -------------------------
+  secondary_event:
+    # Whether to enable secondary event injection.
+    enable: false
+    # Probability of injecting a secondary earthquake waveform into the trace.
+    probability: 0.4
+    # Scaling factor for the secondary event amplitude.
+    scale_min: 0.05  
+    scale_max: 0.2
+    min_offset_samples: 400
+
+# =====================================================================
+# TRAINING & DATALOADER CONFIGURATION
+# =====================================================================
+training:
+  # Global random seed used for reproducibility.
+  seed: 42
+
+  # Base batch size for training.
+  batch_size: 128
+
+  # Total number of training epochs (used later in the trainer).
+  epochs: 50
+
+  # Initial learning rate (optimizer configuration will use this).
+  learning_rate: 3.0e-4
+
+dataloader:
+  # Number of worker processes for PyTorch DataLoader.
+  num_workers: 8
+
+  # Whether to pin memory to speed up host-to-device transfers.
+  pin_memory: true
+
+  # Whether to keep workers alive between epochs.
+  persistent_workers: true
+
+  # Number of batches prefetched by each worker.
+  prefetch_factor: 2
+
+  # Whether to drop the last (possibly incomplete) batch during training.
+  drop_last: true
+
+  # Whether to shuffle the training dataset each epoch.
+  shuffle_train: true
