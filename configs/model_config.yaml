@@ -1,0 +1,163 @@
+model:
+  name: "SeisMambaKAN"
+  input_channels: 3          # Input shape: (B, 3, 6000)
+  input_length: 6000
+  backbone: "mamba_unet_1d"  # Custom backbone defined in network.py
+  normalization: "layernorm"
+  activation: "silu"
+  dropout: 0.10
+  use_channels_last: true    # Optional: used by training loop for memory optimization
+  # Optional mixed precision flag (can be used in training script)
+  use_amp: true
+
+# ============================================================
+# ENCODER: 1D U-Net + Mamba Architecture
+# ============================================================
+encoder:
+  stem:
+    out_channels: 16         # Reduced from 64 to 16 for significant parameter savings
+    kernel_size: 7
+    stride: 1
+    padding: 3
+    bias: true
+
+  # Progressive downsampling: 6000 → 6000 → 3000 → 1500 → 750 → 375
+  stages:
+    - name: "enc_stage_0"
+      d_model: 16
+      n_layers: 1
+      downsample_factor: 1   # Maintains resolution: 6000 → 6000
+      use_mamba: true
+
+    - name: "enc_stage_1"
+      d_model: 24
+      n_layers: 2
+      downsample_factor: 2   # First downsampling: 6000 → 3000
+      use_mamba: true
+
+    - name: "enc_stage_2"
+      d_model: 32
+      n_layers: 2
+      downsample_factor: 2   # Second downsampling: 3000 → 1500
+      use_mamba: true
+
+    - name: "enc_stage_3"
+      d_model: 48
+      n_layers: 2
+      downsample_factor: 2   # Third downsampling: 1500 → 750
+      use_mamba: true
+
+    - name: "bottleneck"
+      d_model: 64            # Lightweight bottleneck instead of heavy ResNet head
+      n_layers: 3
+      downsample_factor: 2   # Final downsampling: 750 → 375
+      use_mamba: true
+
+  mamba:
+    d_state: 16
+    expand_factor: 1.5       # Reduced from 2.0 to 1.5 for lighter parameters and FLOPs
+    conv_kernel: 4
+    dropout: 0.10
+    bias: true
+    use_fast_path: true
+    layer_norm_eps: 1e-5
+
+# ============================================================
+# DECODER: U-Net Upsampling + KAN Block Integration
+# ============================================================
+decoder:
+  upsample_mode: "conv_transpose"  # Uses 1D ConvTranspose for upsampling
+  concat_skips: true               # U-Net style skip connections: [upsampled] ⊕ [skip]
+
+  # Progressive upsampling: 375 → 750 → 1500 → 3000 → 6000
+  stages:
+    - name: "dec_stage_3"
+      d_model: 48
+      n_layers: 1
+      upsample_factor: 2
+      skip_from: "enc_stage_3"
+      use_kan: true
+
+    - name: "dec_stage_2"
+      d_model: 32
+      n_layers: 1
+      upsample_factor: 2
+      skip_from: "enc_stage_2"
+      use_kan: true
+
+    - name: "dec_stage_1"
+      d_model: 24
+      n_layers: 1
+      upsample_factor: 2
+      skip_from: "enc_stage_1"
+      use_kan: true
+
+    - name: "dec_stage_0"
+      d_model: 16
+      n_layers: 1
+      upsample_factor: 2
+      skip_from: "enc_stage_0"
+      use_kan: true
+
+  kan:
+    # Hidden dimension calculated as: hidden_dim = int(d_model * hidden_factor)
+    hidden_factor: 2.0        # Multiplier for hidden dimension calculation
+    grid_size: 3              # Reduced from 5 to 3 for computational efficiency while maintaining flexibility
+    spline_order: 3
+    base_activation: "silu"
+    dropout: 0.10
+    bias: true
+    apply_per_timestep: true  # Apply KAN per timestep: (T, C) → KAN applied to each time step
+
+# ============================================================
+# OUTPUT HEADS: Detection + P-wave + S-wave Prediction
+# ============================================================
+heads:
+  shared:
+    in_channels: 16       # Input from dec_stage_0 output (C=16, L=6000)
+    kernel_size: 1
+    bias: true
+
+  detection:
+    type: "ConvHead1D"
+    out_channels: 1
+    activation: "sigmoid"   # Output range [0,1] for event probability
+    target: "detection"
+    loss: "bce"             # Binary cross-entropy loss (readable by training loop)
+
+  p_gaussian:
+    type: "ConvHead1D"
+    out_channels: 1
+    activation: "none"      # No activation for Gaussian labels with MSE loss
+    target: "p_gaussian"
+    loss: "mse"
+
+  s_gaussian:
+    type: "ConvHead1D"
+    out_channels: 1
+    activation: "none"
+    target: "s_gaussian"
+    loss: "mse"
+
+# ============================================================
+# REGULARIZATION & TRAINING CONFIGURATION
+# ============================================================
+regularization:
+  weight_decay: 0.01
+  dropout: 0.10
+
+  # Future extensibility: label smoothing parameters
+  label_smoothing:
+    detection: 0.0
+    p_gaussian: 0.0
+    s_gaussian: 0.0
+
+init:
+  type: "xavier_uniform"
+  gain: 1.0
+
+# Optional: Multi-task loss weights (can be read by training loop for future use)
+loss_weights:
+  detection: 1.0
+  p_gaussian: 1.0
+  s_gaussian: 1.0
