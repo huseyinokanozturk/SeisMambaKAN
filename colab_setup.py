@@ -48,17 +48,16 @@ print("[OK] sys.path and SEISMAMBAKAN_ROOT set.")
 
 
 # ==========================
-# 3) Fast Mamba Install
+# 3) Mamba + causal-conv1d Install
 # ==========================
-# Colab often tries to compile mamba-ssm (slow or failure).
-# We install the correct pre-built wheel directly.
-print("\n[INFO] Installing optimized Mamba wheel...")
+print("\n[INFO] Installing Mamba stack (causal-conv1d + mamba-ssm)...")
 try:
-    run("pip install --no-cache-dir mamba-ssm==1.2.0 --extra-index-url https://download.pytorch.org/whl/cu118")
-    print("[OK] Mamba installed via prebuilt CUDA wheel.")
+    # causal-conv1d is a hard dependency for mamba-ssm performance
+    run("pip install --no-cache-dir 'causal-conv1d>=1.0.0' 'mamba-ssm>=1.2.0'")
+    print("[OK] Mamba stack installed.")
 except Exception as e:
-    print("[WARN] Fast Mamba install failed, attempting fallback...")
-    run("pip install mamba-ssm")
+    print(f"[WARN] Mamba stack install failed: {e}")
+    print("[WARN] You may need to install 'causal-conv1d' and 'mamba-ssm' manually later.")
 
 
 # ==========================
@@ -84,7 +83,7 @@ if mode in ("sample", "all"):
     if not os.path.exists(src_dir):
         print(f"[ERROR] Source directory does not exist: {src_dir}")
     else:
-        # Ensure clean directory before copy
+        # Ensure a clean target directory before copy
         if os.path.exists(dst_dir):
             print(f"[INFO] Clearing existing directory: {dst_dir}")
             run(f'rm -rf "{dst_dir}"')
@@ -95,6 +94,7 @@ if mode in ("sample", "all"):
         print(f"      {src_dir}")
         print(f"  →   {dst_dir}")
 
+        # rsync gives a nice global progress bar
         run(f'rsync -ah --info=progress2 "{src_dir}/" "{dst_dir}/"')
 
         print("[OK] Data copy completed.")
@@ -132,6 +132,5 @@ def try_import(pkg: str):
 print("\n[INFO] Import sanity check:")
 for pkg in ["mamba_ssm", "efficient_kan", "webdataset", "yaml", "tqdm"]:
     try_import(pkg)
-
 
 print("\n✅ SeisMambaKAN environment ready.")
