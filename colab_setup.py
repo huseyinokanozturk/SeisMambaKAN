@@ -53,7 +53,8 @@ print("[OK] sys.path and SEISMAMBAKAN_ROOT set.")
 print("\n[INFO] Installing Mamba stack (causal-conv1d + mamba-ssm)...")
 try:
     # causal-conv1d is a hard dependency for mamba-ssm performance
-    run("pip install --no-cache-dir 'causal-conv1d>=1.0.0' 'mamba-ssm>=1.2.0'")
+    run("pip install --no-cache-dir 'causal-conv1d>=1.4.0'")
+    run("pip install --no-cache-dir 'mamba-ssm>=2.2.0'")
     print("[OK] Mamba stack installed.")
 except Exception as e:
     print(f"[WARN] Mamba stack install failed: {e}")

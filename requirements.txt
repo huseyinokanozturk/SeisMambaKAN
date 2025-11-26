@@ -3,8 +3,8 @@ torch>=2.0.0
 
 # --- Model Architecture (Mamba & KAN) ---
 # Required for Mamba GPU kernels
-causal-conv1d>=1.2.0
-mamba-ssm>=1.2.0
+causal-conv1d>=1.4.0
+mamba-ssm>=2.2.0
 # KAN layers implementation
 efficient-kan
 
@@ -12,7 +12,9 @@ efficient-kan
 webdataset
 pyyaml
 numpy
+pandas
 
 # --- Training Monitoring & Progress Tracking ---
 tensorboard
 tqdm
+matplotlib
