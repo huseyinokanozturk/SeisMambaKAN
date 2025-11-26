@@ -54,20 +54,10 @@ def check_drive_mounted():
     return True
 
 
-def sync_github_to_drive(drive_repo_path: str, git_url: str):
-    """Sync GitHub repository to Google Drive (optional feature)."""
-    print(f"\n[SYNC] GitHub -> Drive updating: {drive_repo_path}")
-    drive_repo_path = Path(drive_repo_path)
-    
-    if not drive_repo_path.exists():
-        drive_repo_path.parent.mkdir(parents=True, exist_ok=True)
-        run(f'git clone "{git_url}" "{drive_repo_path}"')
-    else:
-        run(f'git -C "{drive_repo_path}" stash', ignore_error=True)
-        run(f'git -C "{drive_repo_path}" pull')
-        run(f'git -C "{drive_repo_path}" stash pop', ignore_error=True)
-    
-    print("[OK] GitHub -> Drive sync completed.")
+def is_git_repo(path: str) -> bool:
+    """Check if directory is a git repository."""
+    git_dir = Path(path) / ".git"
+    return git_dir.exists()
 
 
 # ==========================
@@ -77,19 +67,44 @@ print("=" * 60)
 print("SeisMambaKAN Environment Setup")
 print("=" * 60)
 
-os.chdir("/content")
-
+# Determine if we're already inside the repo or need to clone
+current_dir = Path.cwd()
 repo_path = Path(f"/content/{REPO_DIR_NAME}")
-if not repo_path.exists():
-    print(f"\n[INFO] Cloning repository: {GIT_REPO_URL}")
-    run(f'git clone "{GIT_REPO_URL}" "{REPO_DIR_NAME}"')
-else:
-    print(f"\n[INFO] Repository exists, pulling latest changes...")
-    run(f'git -C "{REPO_DIR_NAME}" pull')
 
-PROJECT_ROOT = str(repo_path)
-os.chdir(PROJECT_ROOT)
+# Check if current directory IS the repo
+if current_dir.name == REPO_DIR_NAME and is_git_repo(current_dir):
+    print(f"\n[INFO] Already inside repository: {current_dir}")
+    print("[INFO] Pulling latest changes...")
+    run("git pull", ignore_error=True)
+    PROJECT_ROOT = str(current_dir)
+    
+elif repo_path.exists() and repo_path != current_dir:
+    # Repo exists elsewhere, navigate to it
+    print(f"\n[INFO] Repository found at: {repo_path}")
+    os.chdir(repo_path)
+    
+    if is_git_repo(repo_path):
+        print("[INFO] Pulling latest changes...")
+        run("git pull", ignore_error=True)
+    else:
+        print("[WARN] Directory exists but is not a git repo, re-cloning...")
+        os.chdir("/content")
+        run(f'rm -rf "{REPO_DIR_NAME}"')
+        run(f'git clone "{GIT_REPO_URL}" "{REPO_DIR_NAME}"')
+        os.chdir(repo_path)
+    
+    PROJECT_ROOT = str(repo_path)
+    
+else:
+    # Repo doesn't exist, clone it
+    print(f"\n[INFO] Cloning repository: {GIT_REPO_URL}")
+    os.chdir("/content")
+    run(f'git clone "{GIT_REPO_URL}" "{REPO_DIR_NAME}"')
+    os.chdir(repo_path)
+    PROJECT_ROOT = str(repo_path)
+
 print(f"[OK] Project root: {PROJECT_ROOT}")
+print(f"[OK] Current directory: {Path.cwd()}")
 
 
 # ==========================
@@ -115,6 +130,7 @@ try:
         import mamba_ssm
         import causal_conv1d
         print("[OK] Mamba stack already installed.")
+        print(f"    - mamba_ssm version: {mamba_ssm.__version__}")
     except ImportError:
         print("[INFO] Installing causal-conv1d (required for Mamba)...")
         run("pip install --no-cache-dir 'causal-conv1d>=1.4.0'")
@@ -192,7 +208,11 @@ if mode in ("sample", "all"):
                 print("[WARN] rsync not found, using cp instead...")
                 run(f'cp -r "{src_dir}/"* "{dst_dir}/"')
 
-            print("[OK] Data synchronization completed.")
+            # Verify sync
+            if dst_dir.exists() and any(dst_dir.iterdir()):
+                print("[OK] Data synchronization completed.")
+            else:
+                print("[WARN] Data directory appears empty after sync.")
 
 elif mode == "none":
     print("[INFO] DATA_MODE='none', skipping data synchronization.")
@@ -241,11 +261,12 @@ def try_import(pkg: str, friendly_name: str = None):
     """Try importing a package and report status."""
     display_name = friendly_name or pkg
     try:
-        __import__(pkg)
-        print(f"✓ {display_name}")
+        module = __import__(pkg)
+        version = getattr(module, '__version__', 'unknown')
+        print(f"✓ {display_name} ({version})")
         return True
     except ImportError as e:
-        print(f"✗ {display_name} - {str(e)}")
+        print(f"✗ {display_name} - Not found")
         return False
 
 critical_packages = {
@@ -264,10 +285,12 @@ optional_packages = {
 }
 
 print("\nCritical packages:")
-critical_ok = all(try_import(pkg, name) for pkg, name in critical_packages.items())
+critical_results = [try_import(pkg, name) for pkg, name in critical_packages.items()]
+critical_ok = all(critical_results)
 
 print("\nOptional packages:")
-optional_ok = all(try_import(pkg, name) for pkg, name in optional_packages.items())
+optional_results = [try_import(pkg, name) for pkg, name in optional_packages.items()]
+optional_ok = all(optional_results)
 
 
 # ==========================
@@ -279,20 +302,28 @@ print("=" * 60)
 
 print(f"✓ Repository: {PROJECT_ROOT}")
 print(f"✓ Python: {sys.version.split()[0]}")
+print(f"✓ Working directory: {Path.cwd()}")
 
 if critical_ok:
     print("✓ All critical packages installed")
 else:
     print("✗ Some critical packages missing - please review errors above")
+    missing = [name for (pkg, name), ok in zip(critical_packages.items(), critical_results) if not ok]
+    print(f"  Missing: {', '.join(missing)}")
 
 if optional_ok:
     print("✓ All optional packages installed")
 else:
     print("⚠ Some optional packages missing")
+    missing = [name for (pkg, name), ok in zip(optional_packages.items(), optional_results) if not ok]
+    print(f"  Missing: {', '.join(missing)}")
 
 print("\n" + "=" * 60)
 if critical_ok:
     print("✅ SeisMambaKAN environment ready!")
+    print("\nYou can now run your training/inference scripts.")
 else:
     print("⚠️  Setup completed with warnings - check messages above")
+    print("\nSome packages are missing. Install them with:")
+    print("  pip install <package-name>")
 print("=" * 60)
