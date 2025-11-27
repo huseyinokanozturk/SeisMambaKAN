@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-SeisMambaKAN Colab Setup (Mamba from wheels inside project folder)
+SeisMambaKAN Colab Setup
 
-- Wheels directory is now:
-      /content/SeisMambaKAN/wheels
-  and Google Drive mirror:
-      /content/drive/MyDrive/Proje_SeisMamba/SeisMambaKAN/wheels
+1. Update project on Google Drive (optional)
+2. Sync project from GitHub to /content
+3. Copy processed data from Drive to Colab with a progress bar
+4. Install PyTorch (2.5.1 + cu121), Mamba wheels, and other requirements
+5. Set /content/SeisMambaKAN as working directory and run basic checks
 """
 
 import os
@@ -14,234 +15,243 @@ import shutil
 import subprocess
 from pathlib import Path
 
+# ----------------- SETTINGS -----------------
+GIT_REPO_URL   = "https://github.com/huseyinokanozturk/SeisMambaKAN.git"
+COLAB_PROJECT  = "/content/SeisMambaKAN"
 
-# ====================== CONFIG ======================
+DRIVE_PROJECT  = "/content/drive/MyDrive/Proje_SeisMamba/SeisMambaKAN"
+DRIVE_DATA_DIR = f"{DRIVE_PROJECT}/data/processed"
+COLAB_DATA_DIR = f"{COLAB_PROJECT}/data/processed"
+WHEELS_DIR     = f"{DRIVE_PROJECT}/wheels"
 
-GIT_REPO_URL = "https://github.com/huseyinokanozturk/SeisMambaKAN.git"
+# "sample", "all", or "none"
+DATA_MODE      = "sample"
 
-COLAB_PROJECT = "/content/SeisMambaKAN"
-
-DATA_MODE = "sample"  # "sample", "all", "none"
-
-DRIVE_PROJECT = "/content/drive/MyDrive/Proje_SeisMamba/SeisMambaKAN"
-DRIVE_DATA = f"{DRIVE_PROJECT}/data/processed"
-COLAB_DATA = f"{COLAB_PROJECT}/data/processed"
-
-# 🔥 Wheels folder moved inside SeisMambaKAN repo
-DRIVE_WHEELS_DIR = f"{DRIVE_PROJECT}/wheels"
-COLAB_WHEELS_DIR = f"{COLAB_PROJECT}/wheels"
+TARGET_TORCH_VERSION = "2.5.1+cu121"
 
 
-# ====================== HELPERS ======================
-
-def run(cmd: str, cwd: str | None = None) -> bool:
-    result = subprocess.run(
-        cmd, shell=True, cwd=cwd,
-        capture_output=True, text=True
-    )
+def run(cmd: str, desc: str = "") -> bool:
+    """Run shell command and print a short status."""
+    if desc:
+        print(f"[INFO] {desc}")
+    result = subprocess.run(cmd, shell=True, text=True)
     if result.returncode != 0:
         print(f"[WARN] Command failed: {cmd}")
-        if result.stderr:
-            print(result.stderr.strip())
-    return result.returncode == 0
-
-
-def ensure_tqdm():
-    try:
-        from tqdm import tqdm  # noqa
-        return
-    except:
-        print("[INFO] Installing tqdm...")
-        run("pip install -q tqdm")
-
-
-def copy_data_with_progress(src: Path, dst: Path):
-    from tqdm import tqdm
-
-    if not src.exists():
-        print(f"[WARN] Missing data directory: {src}")
-        return
-
-    files = [p for p in src.rglob("*") if p.is_file()]
-    if not files:
-        print(f"[INFO] No files found in: {src}")
-        return
-
-    print(f"[INFO] Copying {len(files)} files from {src} to {dst}")
-
-    for file_path in tqdm(files, desc="Copying data", unit="file"):
-        rel = file_path.relative_to(src)
-        target = dst / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(file_path, target)
-
-    print("[INFO] Data copy OK.")
-
-
-def has_module(name: str) -> bool:
-    try:
-        __import__(name)
-        return True
-    except:
         return False
+    return True
 
-
-# ====================== STEPS ======================
 
 def update_drive_repo():
-    print("\n[0/6] Updating Drive repo (optional)...")
+    """Optional: git pull inside Drive project (if it is a git repo)."""
+    print("\n[0/5] Updating Drive repo (optional)...")
+    drive_path = Path(DRIVE_PROJECT)
 
     if not Path("/content/drive").exists():
-        print("[INFO] Drive not mounted — skipping.")
+        print("[WARN] Drive is not mounted, skipping Drive repo update.")
         return
 
-    if not (Path(DRIVE_PROJECT) / ".git").exists():
-        print("[INFO] Drive repo missing or not git — skipping.")
+    if not drive_path.exists():
+        print(f"[WARN] Drive project folder does not exist: {DRIVE_PROJECT}")
         return
 
-    run("git stash", cwd=DRIVE_PROJECT)
-    run("git pull --rebase", cwd=DRIVE_PROJECT)
-    run("git stash pop", cwd=DRIVE_PROJECT)
-    print("[OK] Drive repo update attempted.")
+    if not (drive_path / ".git").exists():
+        print("[WARN] Drive project is not a git repository, skipping.")
+        return
+
+    os.chdir(DRIVE_PROJECT)
+    run("git status -sb", "git status (for your info)")
+    run("git stash", "git stash")
+    run("git pull --rebase", "git pull --rebase")
+    run("git stash pop", "git stash pop")
+    print("[OK] Drive repo update attempted (check warnings above if any).")
 
 
-def setup_colab_repo():
-    print("\n[1/6] Preparing Colab repo...")
-
+def prepare_colab_repo():
+    """Clone or update the GitHub repo into /content."""
+    print("\n[1/5] Preparing Colab repo...")
     colab_path = Path(COLAB_PROJECT)
 
     if colab_path.exists() and (colab_path / ".git").exists():
-        print("[INFO] Updating existing repo...")
-        run("git stash", cwd=COLAB_PROJECT)
-        run("git pull --rebase", cwd=COLAB_PROJECT)
-        run("git stash pop", cwd=COLAB_PROJECT)
-        print("[OK] Repo updated.")
-        return
+        print("[INFO] Existing git repo found in Colab. Pulling latest changes...")
+        os.chdir(COLAB_PROJECT)
+        run("git stash", "git stash")
+        run("git pull --rebase", "git pull --rebase")
+        run("git stash pop", "git stash pop")
+        print("[OK] Colab repo updated.")
+    else:
+        print("[INFO] Cloning fresh repo...")
+        if colab_path.exists():
+            run(f"rm -rf {COLAB_PROJECT}", "Removing non-git folder at COLAB_PROJECT")
+        os.chdir("/content")
+        run(f"git clone {GIT_REPO_URL} {COLAB_PROJECT}", "Cloning repository")
+        print("[OK] Repo cloned.")
 
-    if colab_path.exists():
-        print(f"[ERROR] {COLAB_PROJECT} exists but is NOT a git repo.")
-        sys.exit(1)
 
-    print("[INFO] Cloning repo fresh...")
-    run(f"git clone {GIT_REPO_URL} {COLAB_PROJECT}", cwd="/content")
-    print("[OK] Repo cloned.")
-
-
-def copy_data():
-    print("\n[2/6] Copying data from Drive → Colab...")
+def copy_data_with_progress():
+    """Copy processed data from Drive to Colab with a progress bar."""
+    print("\n[2/5] Copying data from Drive → Colab...")
 
     if DATA_MODE == "none":
-        print("[INFO] Skipping data copy.")
+        print("[INFO] DATA_MODE='none', skipping data copy.")
         return
+
+    src_root = Path(DRIVE_DATA_DIR) / DATA_MODE
+    dst_root = Path(COLAB_DATA_DIR) / DATA_MODE
 
     if not Path("/content/drive").exists():
-        print("[WARN] Drive not mounted — skipping.")
+        print("[WARN] Drive is not mounted, cannot copy data.")
         return
 
-    src = Path(DRIVE_DATA) / DATA_MODE
-    dst = Path(COLAB_DATA) / DATA_MODE
+    if not src_root.exists():
+        print(f"[WARN] Source data not found: {src_root}")
+        return
 
-    if dst.exists():
-        shutil.rmtree(dst, ignore_errors=True)
+    # Collect files
+    files = [p for p in src_root.rglob("*") if p.is_file()]
+    total = len(files)
+    if total == 0:
+        print(f"[WARN] No files found under: {src_root}")
+        return
 
-    dst.parent.mkdir(parents=True, exist_ok=True)
+    # Clean destination
+    if dst_root.exists():
+        run(f"rm -rf {dst_root}", "Removing old data folder in Colab")
+    dst_root.mkdir(parents=True, exist_ok=True)
 
-    ensure_tqdm()
-    copy_data_with_progress(src, dst)
+    # Try to use tqdm if available
+    try:
+        from tqdm import tqdm
+        iterator = tqdm(files, desc="Copying data", unit="file")
+        use_tqdm = True
+    except Exception:
+        iterator = files
+        use_tqdm = False
+
+    print(f"[INFO] Copying {total} files from {src_root} to {dst_root} ...")
+    for idx, src in enumerate(iterator, 1):
+        rel = src.relative_to(src_root)
+        dst = dst_root / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        if not use_tqdm and idx % 10 == 0:
+            print(f"Copied {idx}/{total} files")
+
+    print("[INFO] Data copy completed.")
 
 
 def configure_python_env():
-    print("\n[3/6] Configuring Python environment...")
-
+    """Set working directory and basic environment variables."""
+    print("\n[3/5] Configuring Python environment...")
     os.chdir(COLAB_PROJECT)
     if COLAB_PROJECT not in sys.path:
         sys.path.insert(0, COLAB_PROJECT)
     os.environ["SEISMAMBAKAN_ROOT"] = COLAB_PROJECT
+    print(f"[OK] Working dir: {COLAB_PROJECT}")
+    print(f"[OK] SEISMAMBAKAN_ROOT set.")
 
-    print(f"[OK] Working directory: {COLAB_PROJECT}")
-    print("[OK] SEISMAMBAKAN_ROOT set.")
+
+def ensure_torch_stack():
+    """Ensure torch/vision/audio are installed with the target cu121 version."""
+    print("\n[4/5] Installing Python packages (PyTorch + wheels + requirements)...")
+
+    need_install = False
+    try:
+        import torch  # type: ignore
+        current = torch.__version__
+        if current != TARGET_TORCH_VERSION:
+            print(f"[INFO] Torch version is {current}, expected {TARGET_TORCH_VERSION}. Reinstalling.")
+            need_install = True
+        else:
+            print(f"[OK] Torch version already {TARGET_TORCH_VERSION}.")
+    except Exception:
+        print("[INFO] Torch is not installed, installing.")
+        need_install = True
+
+    if need_install:
+        cmd = (
+            "pip install -q --index-url https://download.pytorch.org/whl/cu121 "
+            "torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1"
+        )
+        run(cmd, "Installing torch/vision/audio (cu121)")
 
 
 def install_mamba_from_wheels():
-    print("\n[4/6] Installing Mamba from wheels...")
+    """Install mamba_ssm and causal_conv1d from wheels stored on Drive."""
+    mamba_whl = Path(WHEELS_DIR) / "mamba_ssm-2.2.6.post3-cp312-cp312-linux_x86_64.whl"
+    causal_whl = Path(WHEELS_DIR) / "causal_conv1d-1.5.3.post1-cp312-cp312-linux_x86_64.whl"
 
-    # Already installed?
-    if has_module("mamba_ssm"):
-        print("[OK] mamba_ssm already installed.")
+    if not mamba_whl.exists() or not causal_whl.exists():
+        print(f"[WARN] Mamba wheels not found in {WHEELS_DIR}. Skipping Mamba install.")
         return
 
-    # Copy wheels from Drive → Colab project
-    wheels_src = Path(DRIVE_WHEELS_DIR)
-    wheels_dst = Path(COLAB_WHEELS_DIR)
-
-    if not wheels_src.exists():
-        print(f"[WARN] Wheels not found on Drive: {wheels_src}")
-        print("       You must build wheels first.")
-        return
-
-    wheels_dst.mkdir(parents=True, exist_ok=True)
-    run(f"cp {wheels_src}/*.whl {wheels_dst}/")
-
-    # Install from local project wheels folder
-    cmd = f"pip install -q {wheels_dst}/causal_conv1d-*.whl {wheels_dst}/mamba_ssm-*.whl"
-    ok = run(cmd)
-
-    if ok and has_module("mamba_ssm"):
-        print("[OK] mamba_ssm installed from project wheels.")
-    else:
-        print("[WARN] Failed to install mamba_ssm.")
+    cmd = f"pip install -q \"{causal_whl}\" \"{mamba_whl}\""
+    run(cmd, "Installing mamba_ssm + causal_conv1d from Drive wheels")
+    print("[OK] Mamba + causal_conv1d installed from wheels.")
 
 
 def install_requirements():
-    print("\n[5/6] Installing packages from requirements.txt...")
-
+    """Install remaining Python dependencies from requirements.txt."""
     req = Path(COLAB_PROJECT) / "requirements.txt"
-    if req.exists():
-        run(f"pip install -q -r {req}")
-        print("[OK] requirements installed.")
-    else:
-        print("[INFO] No requirements.txt — skipping.")
+    if not req.exists():
+        print(f"[WARN] requirements.txt not found at {req}, skipping.")
+        return
+    cmd = f"pip install -q -r \"{req}\""
+    run(cmd, f"Installing requirements from {req}")
+    print("[OK] requirements.txt installation finished.")
 
 
-def final_check():
-    print("\n[6/6] Final checks...")
-
+def final_checks():
+    """Import a few core packages and check GPU."""
+    print("\n[5/5] Running final checks...")
     errors = []
+
+    def check_pkg(name):
+        nonlocal errors
+        try:
+            __import__(name)
+            print(f"[OK] import {name}")
+        except Exception:
+            print(f"[FAIL] could not import: {name}")
+            errors.append(name)
+
     for pkg in ["torch", "numpy", "mamba_ssm", "efficient_kan"]:
-        if has_module(pkg):
-            print(f"[OK] {pkg} imported.")
-        else:
-            print(f"[FAIL] {pkg} missing.")
-            errors.append(pkg)
+        check_pkg(pkg)
 
     try:
-        import torch
+        import torch  # type: ignore
         if torch.cuda.is_available():
-            print(f"[OK] GPU: {torch.cuda.get_device_name(0)}")
-    except:
-        print("[WARN] torch check failed.")
+            print(f"[OK] GPU detected: {torch.cuda.get_device_name(0)}")
+        else:
+            print("[WARN] CUDA GPU not available.")
+    except Exception:
+        print("[WARN] torch CUDA check failed.")
 
     print("\n" + "=" * 50)
-    if errors:
-        print("Missing:", ", ".join(errors))
+    if not errors:
+        print("✅ READY!")
+        print(f"📂 Working directory: {COLAB_PROJECT}")
+        print("\nYou can now run, for example:")
+        print("   import os, sys")
+        print(f"   sys.path.insert(0, '{COLAB_PROJECT}')")
+        print(f"   os.chdir('{COLAB_PROJECT}')")
+        print("\n   # Then run your training script, e.g.:")
+        print("   !python train.py")
     else:
-        print("Environment ready.")
+        print("⚠️ Some packages failed to import:", ", ".join(errors))
+        print("   You can try: pip install <package-name>")
     print("=" * 50)
-
-
-def main():
-    print("=" * 50)
-    print("SeisMambaKAN Colab Setup (Wheels inside project)")
-    print("=" * 50)
-
-    update_drive_repo()
-    setup_colab_repo()
-    copy_data()
-    configure_python_env()
-    install_mamba_from_wheels()
-    install_requirements()
-    final_check()
 
 
 if __name__ == "__main__":
-    main()
+    print("=" * 50)
+    print("SeisMambaKAN Colab Setup")
+    print("=" * 50)
+
+    update_drive_repo()
+    prepare_colab_repo()
+    copy_data_with_progress()
+    configure_python_env()
+    ensure_torch_stack()
+    install_mamba_from_wheels()
+    install_requirements()
+    final_checks()

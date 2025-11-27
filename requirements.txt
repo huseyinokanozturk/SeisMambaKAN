@@ -1,6 +1,4 @@
-# --- PyTorch Core (Already available in Colab but good to pin version) ---
-torch>=2.0.0
-
+# --- Core ML dependencies (torch is handled in colab_setup.py) ---
 # --- Model Architecture (Mamba & KAN) ---
 
 # Required for Mamba GPU kernels
