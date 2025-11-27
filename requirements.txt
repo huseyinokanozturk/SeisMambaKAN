@@ -2,8 +2,10 @@
 torch>=2.0.0
 
 # --- Model Architecture (Mamba & KAN) ---
+
 # Required for Mamba GPU kernels
-mamba-ssm[causal-conv1d]>=2.2.0
+#mamba-ssm[causal-conv1d]>=2.2.0 --> using pre-build wheels for now
+
 # KAN layers implementation
 efficient-kan @ git+https://github.com/Blealtan/efficient-kan.git
 
