@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-SeisMambaKAN Colab Setup (No Mamba Version)
+SeisMambaKAN Colab Setup (Python 3.10, with Mamba + KAN)
 
 1. Clone or update the project from GitHub into /content.
 2. Optionally update the copy on Google Drive (if it's a git repo).
 3. Copy processed data from Drive to Colab with a progress bar.
-4. Configure Python environment and install required packages (KAN + general deps).
+4. Configure Python environment and install required packages (Mamba, KAN, etc.).
 """
 
 import os
@@ -180,12 +180,23 @@ def configure_python_env():
 def install_packages():
     print("\n[4/5] Installing Python packages...")
 
-    # efficient-kan (GitHub only)
+    # Mamba + causal-conv1d (binary wheels only, no source build)
+    if not has_module("mamba_ssm"):
+        print("[INFO] Installing mamba-ssm (binary wheel only, with causal-conv1d)...")
+        ok = run("pip install -q --only-binary=:all: 'mamba-ssm[causal-conv1d]'")
+        if not ok:
+            print("[WARN] Could not install mamba-ssm from binary wheel. Skipping Mamba.")
+    else:
+        print("[OK] mamba_ssm already installed.")
+
+    # efficient-kan (from GitHub)
     if not has_module("efficient_kan"):
         print("[INFO] Installing efficient-kan from GitHub...")
         run("pip install -q 'efficient-kan @ git+https://github.com/Blealtan/efficient-kan.git'")
+    else:
+        print("[OK] efficient_kan already installed.")
 
-    # requirements.txt
+    # requirements.txt (should NOT include mamba-ssm / efficient-kan)
     req = Path(COLAB_PROJECT) / "requirements.txt"
     if req.exists():
         print(f"[INFO] Installing requirements from {req}")
@@ -201,7 +212,7 @@ def final_check():
 
     errors = []
 
-    for pkg in ["torch", "numpy", "efficient_kan"]:
+    for pkg in ["torch", "numpy", "mamba_ssm", "efficient_kan"]:
         try:
             __import__(pkg)
             print(f"[OK] {pkg} imported.")
@@ -215,7 +226,7 @@ def final_check():
             print(f"[OK] GPU: {torch.cuda.get_device_name(0)}")
         else:
             print("[WARN] GPU not available.")
-    except:
+    except Exception:
         print("[WARN] torch not available for GPU check.")
 
     print("\n" + "=" * 50)
@@ -230,7 +241,7 @@ def final_check():
 
 def main():
     print("=" * 50)
-    print("SeisMambaKAN Colab Setup (No Mamba)")
+    print("SeisMambaKAN Colab Setup (Python 3.10, with Mamba + KAN)")
     print("=" * 50)
 
     update_drive_repo()
