@@ -14,6 +14,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+
 # ====================== CONFIG ======================
 
 GIT_REPO_URL = "https://github.com/huseyinokanozturk/SeisMambaKAN.git"
@@ -27,15 +28,11 @@ DRIVE_PROJECT = "/content/drive/MyDrive/Proje_SeisMamba/SeisMambaKAN"
 DRIVE_DATA = f"{DRIVE_PROJECT}/data/processed"
 COLAB_DATA = f"{COLAB_PROJECT}/data/processed"
 
-# Mamba wheel (precompiled, avoids slow source build)
-MAMBA_WHEEL_URL = (
-    "https://github.com/state-spaces/mamba/releases/download/v2.2.2/"
-    "mamba_ssm-2.2.2-cp310-cp310-manylinux2014_x86_64.whl"
-)
 
+# ====================== HELPERS ======================
 
 def run(cmd: str, cwd: str | None = None) -> bool:
-    """Run a shell command, return True if it succeeds."""
+    """Run a shell command, print warnings on failure, return True if it succeeds."""
     result = subprocess.run(
         cmd,
         shell=True,
@@ -44,14 +41,23 @@ def run(cmd: str, cwd: str | None = None) -> bool:
         text=True,
     )
     if result.returncode != 0:
-        print(f"[WARN] Command failed ({cmd})")
+        print(f"[WARN] Command failed: {cmd}")
         if result.stderr:
             print(result.stderr.strip())
     return result.returncode == 0
 
 
+def has_module(name: str) -> bool:
+    """Return True if a Python module can be imported."""
+    try:
+        __import__(name)
+        return True
+    except Exception:
+        return False
+
+
 def ensure_tqdm():
-    """Ensure tqdm is available for progress bar."""
+    """Ensure tqdm is available for the progress bar."""
     try:
         from tqdm import tqdm  # noqa: F401
         return
@@ -90,15 +96,17 @@ def copy_data_with_progress(src: Path, dst: Path):
     print("[INFO] Data copy completed.")
 
 
+# ====================== STEPS ======================
+
 def update_drive_repo():
     """If the repo exists on Drive and is a git repo, run git pull."""
-    drive_path = Path(DRIVE_PROJECT)
-
     print("\n[0/5] Updating project on Google Drive (optional)...")
 
     if not Path("/content/drive").exists():
         print("[INFO] Drive is not mounted. Skipping Drive repo update.")
         return
+
+    drive_path = Path(DRIVE_PROJECT)
 
     if not drive_path.exists():
         print(f"[INFO] Drive project directory does not exist: {DRIVE_PROJECT}")
@@ -109,10 +117,16 @@ def update_drive_repo():
         return
 
     print(f"[INFO] Running git pull in {DRIVE_PROJECT} ...")
-    run("git stash", cwd=DRIVE_PROJECT)
-    run("git pull --rebase", cwd=DRIVE_PROJECT)
-    run("git stash pop", cwd=DRIVE_PROJECT)
-    print("[OK] Drive repository updated.")
+    ok_stash = run("git stash", cwd=DRIVE_PROJECT)
+    ok_pull = run("git pull --rebase", cwd=DRIVE_PROJECT)
+    ok_pop = run("git stash pop", cwd=DRIVE_PROJECT)
+
+    if ok_pull:
+        print("[OK] Drive repository updated.")
+    else:
+        print("[WARN] Drive repository could not be updated cleanly. Please fix it manually if needed.")
+        if not ok_stash or not ok_pop:
+            print("[WARN] Stash operations also reported issues.")
 
 
 def setup_colab_repo():
@@ -154,7 +168,10 @@ def copy_data():
     src_data = Path(DRIVE_DATA) / DATA_MODE
     dst_data = Path(COLAB_DATA) / DATA_MODE
 
-    # Clean target directory
+    if not src_data.exists():
+        print(f"[WARN] Source data directory does not exist: {src_data}")
+        return
+
     if dst_data.exists():
         print(f"[INFO] Removing existing target directory: {dst_data}")
         shutil.rmtree(dst_data, ignore_errors=True)
@@ -166,7 +183,6 @@ def copy_data():
         from tqdm import tqdm  # noqa: F401
     except Exception:
         print("[WARN] tqdm not available. Copying without progress bar.")
-        # Fallback: simple recursive copy
         run(f"cp -r {src_data} {dst_data}")
         return
 
@@ -189,21 +205,23 @@ def configure_python_env():
 
 
 def install_packages():
-    """Install mamba-ssm, causal-conv1d and requirements.txt."""
+    """Install mamba-ssm, causal-conv1d, efficient-kan and requirements.txt."""
     print("\n[4/5] Installing Python packages...")
 
-    # mamba-ssm and causal-conv1d
-    try:
-        import mamba_ssm  # noqa: F401
-        print("[OK] mamba_ssm is already installed.")
-    except Exception:
-        print("[INFO] Installing causal-conv1d (binary only)...")
-        run("pip install -q --only-binary=:all: causal-conv1d==1.4.0")
+    # mamba-ssm + causal-conv1d (official way)
+    if not has_module("mamba_ssm"):
+        print("[INFO] Installing mamba-ssm (with causal-conv1d) from PyPI...")
+        ok = run("pip install -q 'mamba-ssm[causal-conv1d]'")
+        if not ok:
+            print("[WARN] mamba-ssm[causal-conv1d] failed, trying separate install...")
+            run("pip install -q mamba-ssm causal-conv1d")
 
-        print("[INFO] Installing mamba-ssm from precompiled wheel...")
-        run(f"pip install -q {MAMBA_WHEEL_URL}")
+    # efficient-kan (from GitHub, not on PyPI)
+    if not has_module("efficient_kan"):
+        print("[INFO] Installing efficient-kan from GitHub...")
+        run("pip install -q 'efficient-kan @ git+https://github.com/Blealtan/efficient-kan.git'")
 
-    # requirements.txt
+    # Other dependencies from requirements.txt
     req_path = Path(COLAB_PROJECT) / "requirements.txt"
     if req_path.exists():
         print(f"[INFO] Installing requirements from {req_path} ...")
@@ -254,6 +272,8 @@ def final_check():
         print("  pip install <package-name>")
     print("=" * 50)
 
+
+# ====================== MAIN ======================
 
 def main():
     print("=" * 50)
