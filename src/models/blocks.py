@@ -27,20 +27,28 @@ except ImportError as e:
 def get_activation(name: str) -> nn.Module:
     """
     Returns an activation module given its name.
-    Supported: 'relu', 'gelu', 'silu', 'tanh', 'none'
+    Supported: 'relu', 'gelu', 'silu', 'tanh', 'sigmoid', 'none'
     """
+    if name is None:
+        return nn.Identity()
+
     name = name.lower()
+
     if name == "relu":
         return nn.ReLU(inplace=True)
     if name == "gelu":
         return nn.GELU()
-    if name == "silu" or name == "swish":
+    if name in ("silu", "swish"):
         return nn.SiLU(inplace=True)
     if name == "tanh":
         return nn.Tanh()
-    if name == "none" or name is None:
+    if name == "sigmoid":
+        return nn.Sigmoid()
+    if name == "none":
         return nn.Identity()
+
     raise ValueError(f"Unknown activation: {name}")
+
 
 
 class ChannelLayerNorm1d(nn.Module):
