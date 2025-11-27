@@ -1,5 +1,7 @@
 import math
 from typing import Optional
+from typing import Any
+
 
 import torch
 import torch.nn as nn
@@ -199,7 +201,7 @@ class KANBlock1D(nn.Module):
         d_model: int,
         grid_size: int = 3,
         spline_order: int = 3,
-        base_activation: str = "silu",
+        base_activation: str | Any = "silu",
         dropout: float = 0.0,
         norm_type: str = "layernorm",
         layer_norm_eps: float = 1e-5,
@@ -213,6 +215,25 @@ class KANBlock1D(nn.Module):
                 "Please install it via `pip install efficient-kan`."
             ) from _kan_import_error
 
+        # Map string name -> actual nn.Module class for KANLinear
+        if isinstance(base_activation, str):
+            name = base_activation.lower()
+            if name in ("silu", "swish"):
+                base_activation_cls = nn.SiLU
+            elif name in ("relu", "relu_"):
+                base_activation_cls = nn.ReLU
+            elif name in ("gelu",):
+                base_activation_cls = nn.GELU
+            elif name in ("tanh",):
+                base_activation_cls = nn.Tanh
+            elif name in ("identity", "none"):
+                base_activation_cls = nn.Identity
+            else:
+                raise ValueError(f"Unknown base_activation for KAN: {base_activation}")
+        else:
+            # User already passed a class / callable
+            base_activation_cls = base_activation
+
         self.d_model = d_model
         self.norm = get_norm(norm_type, d_model, eps=layer_norm_eps)
 
@@ -222,23 +243,11 @@ class KANBlock1D(nn.Module):
             out_features=d_model,
             grid_size=grid_size,
             spline_order=spline_order,
-            base_activation=base_activation,
+            base_activation=base_activation_cls,
             enable_standalone_scale_spline=enable_standalone_scale_spline,
         )
 
         self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        x: (B, C, T)
-        """
-        residual = x
-        x = self.norm(x)              # (B, C, T)
-        x = x.transpose(1, 2)         # (B, T, C)
-        x = self.kan(x)               # (B, T, C)
-        x = self.dropout(x)
-        x = x.transpose(1, 2)         # (B, C, T)
-        return x + residual
 
 
 # ============================================================
