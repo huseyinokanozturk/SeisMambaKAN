@@ -197,7 +197,7 @@ class KANBlock1D(nn.Module):
     """
     Residual KAN block for 1D sequences.
 
-    - Takes (B, C, T).
+    - Input:  (B, C, T)
     - Normalizes over channels.
     - Treats last dim as feature dim via (B, T, C).
     - Applies a KANLinear(C -> C) over the feature dimension.
@@ -221,41 +221,54 @@ class KANBlock1D(nn.Module):
             raise ImportError(
                 "Could not import KANLinear from efficient_kan. "
                 "Please install it via `pip install efficient-kan`."
-            ) from _kan_import_error
+            )
 
-        # Map string name -> actual nn.Module class for KANLinear
+        # string -> activation class map
         if isinstance(base_activation, str):
             name = base_activation.lower()
             if name in ("silu", "swish"):
-                base_activation_cls = nn.SiLU
+                base_act_cls = nn.SiLU
             elif name in ("relu", "relu_"):
-                base_activation_cls = nn.ReLU
-            elif name in ("gelu",):
-                base_activation_cls = nn.GELU
-            elif name in ("tanh",):
-                base_activation_cls = nn.Tanh
+                base_act_cls = nn.ReLU
+            elif name == "gelu":
+                base_act_cls = nn.GELU
+            elif name == "tanh":
+                base_act_cls = nn.Tanh
             elif name in ("identity", "none"):
-                base_activation_cls = nn.Identity
+                base_act_cls = nn.Identity
             else:
                 raise ValueError(f"Unknown base_activation for KAN: {base_activation}")
         else:
-            # User already passed a class / callable
-            base_activation_cls = base_activation
+            # user already passed class/callable
+            base_act_cls = base_activation
 
         self.d_model = d_model
         self.norm = get_norm(norm_type, d_model, eps=layer_norm_eps)
 
-        # KANLinear works on the last dimension; we will feed (B, T, C)
+        # KANLinear works on last dim => we use (B, T, C)
         self.kan = KANLinear(
             in_features=d_model,
             out_features=d_model,
             grid_size=grid_size,
             spline_order=spline_order,
-            base_activation=base_activation_cls,
+            base_activation=base_act_cls,
             enable_standalone_scale_spline=enable_standalone_scale_spline,
         )
 
         self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: (B, C, T)
+        """
+        residual = x                  # (B, C, T)
+        x = self.norm(x)              # (B, C, T)
+        x = x.transpose(1, 2)         # (B, T, C)
+        x = self.kan(x)               # (B, T, C)
+        x = x.transpose(1, 2)         # (B, C, T)
+        x = self.dropout(x)
+        return x + residual
+
 
 
 # ============================================================
