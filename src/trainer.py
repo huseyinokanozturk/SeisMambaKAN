@@ -87,25 +87,30 @@ def build_model_and_loss(
     main_cfg: Dict[str, Any],
     model_cfg: Dict[str, Any],
     device: torch.device,
-) -> Tuple[torch.nn.Module, torch.nn.Module, bool]:
+) -> Tuple[torch.nn.Module, torch.nn.Module, bool, bool]:
     """
     Build SeisMambaKAN model and loss function based on the provided configs.
+
+    Returns:
+        model:                 the initialized model on the target device
+        loss_fn:               configured loss module
+        use_amp:               whether to use mixed precision
+        use_channels_last:     whether channels_last is requested in config
+
+    Note:
+        channels_last is only meaningful for 4D tensors (N, C, H, W) used in
+        Conv2d. Since the current architecture is Conv1d with shapes (B, C, T),
+        the trainer will only apply channels_last when a 4D input is detected.
     """
-    # Build model
     model = SeisMambaKAN(model_cfg)
     model = model.to(device)
 
     model_core_cfg = model_cfg.get("model", {})
-    use_channels_last = bool(model_core_cfg.get("use_channels_last", False))
-    if use_channels_last:
-        model = model.to(memory_format=torch.channels_last)
-
     use_amp = bool(model_core_cfg.get("use_amp", False))
+    use_channels_last = bool(model_core_cfg.get("use_channels_last", False))
 
-    # Build loss
     loss_fn = build_loss_fn(main_cfg)
-
-    return model, loss_fn, use_amp
+    return model, loss_fn, use_amp, use_channels_last
 
 
 def build_optimizer(
@@ -150,6 +155,7 @@ class Trainer:
         exp_dir: Path,
         ckpt_dir: Path,
         use_amp: bool,
+        use_channels_last: bool,
     ) -> None:
         self.model = model
         self.loss_fn = loss_fn
@@ -168,9 +174,8 @@ class Trainer:
         self.dataloader_cfg = main_cfg.get("dataloader", {})
         self.loss_cfg = main_cfg.get("loss", {})
 
-        self.channels_last = bool(
-            model_cfg.get("model", {}).get("use_channels_last", False)
-        )
+        # Whether to attempt channels_last layout for 4D tensors
+        self.channels_last = bool(use_channels_last)
 
         # AMP scaler (new torch.amp API)
         self.scaler = amp.GradScaler(enabled=self.use_amp)
@@ -190,13 +195,34 @@ class Trainer:
 
     def _prepare_inputs(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Convert input from (B, T, C) to (B, C, T) and move to device.
-        Optionally convert to channels_last memory format.
+        Move inputs to device and adjust layout.
+
+        Current dataset provides waveforms as (B, T, C).
+        For Conv1d, we convert to (B, C, T).
+
+        If the model is ever changed to use 2D convolutions with 4D inputs
+        (B, C, H, W), and use_channels_last=True in model_config.yaml, this
+        function will apply channels_last memory format to the 4D tensor.
+
+        For 3D tensors (Conv1d), channels_last is not supported by PyTorch,
+        so the flag is ignored.
         """
-        x = x.to(self.device, non_blocking=True)  # (B, T, C)
-        x = x.permute(0, 2, 1).contiguous()      # (B, C, T)
-        if self.channels_last:
-            x = x.to(memory_format=torch.channels_last)
+        x = x.to(self.device, non_blocking=True)
+
+        if x.dim() == 3:
+            # (B, T, C) -> (B, C, T) for Conv1d
+            x = x.permute(0, 2, 1).contiguous()
+            # channels_last is not defined for 3D tensors; ignore flag here.
+            return x
+
+        if x.dim() == 4:
+            # If in the future dataset/network uses Conv2d with 4D inputs,
+            # channels_last can be applied here.
+            if self.channels_last:
+                x = x.to(memory_format=torch.channels_last)
+            return x
+
+        # Fallback: just return moved tensor
         return x
 
     def _move_labels_to_device(self, labels: Dict[str, Any]) -> Dict[str, Any]:
@@ -246,7 +272,6 @@ class Trainer:
             with amp.autocast(device_type=self.device.type, enabled=self.use_amp):
                 outputs = self.model(x)
                 loss_dict = self.loss_fn(outputs, labels)
-
                 total_loss = loss_dict["total"]
 
             self.scaler.scale(total_loss).backward()
@@ -392,6 +417,7 @@ class Trainer:
         self._log(f"Starting training for {num_epochs} epochs.")
         self._log(f"Experiment directory: {self.exp_dir}")
         self._log(f"Device: {self.device.type}, AMP: {self.use_amp}")
+        self._log(f"use_channels_last (4D only): {self.channels_last}")
 
         for epoch in range(1, num_epochs + 1):
             train_metrics = self.train_one_epoch(epoch)
@@ -490,7 +516,11 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Model, loss, optimizer
     # ------------------------------------------------------------------
-    model, loss_fn, use_amp = build_model_and_loss(main_cfg, model_cfg, device)
+    model, loss_fn, use_amp, use_channels_last = build_model_and_loss(
+        main_cfg,
+        model_cfg,
+        device,
+    )
     optimizer = build_optimizer(model, main_cfg, model_cfg)
 
     # ------------------------------------------------------------------
@@ -509,6 +539,7 @@ def main() -> None:
         exp_dir=exp_dir,
         ckpt_dir=ckpt_dir,
         use_amp=use_amp,
+        use_channels_last=use_channels_last,
     )
 
     trainer.fit()

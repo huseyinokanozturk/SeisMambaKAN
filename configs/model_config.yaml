@@ -156,8 +156,4 @@ init:
   type: "xavier_uniform"
   gain: 1.0
 
-# Optional: Multi-task loss weights (can be read by training loop for future use)
-loss_weights:
-  detection: 1.0
-  p_gaussian: 1.0
-  s_gaussian: 1.0
+
