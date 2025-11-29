@@ -1,9 +1,12 @@
 # configs/paths.yaml
 
-# Data Paths Configuration
+# =====================================================================
+# DATA PATHS CONFIGURATION
+# =====================================================================
 data:
   # Directory containing raw CSV files
   raw_csv_dir: "data/raw/csv"
+
   # Directory containing raw HDF5 files
   raw_hdf5_dir: "data/raw/hdf5"
 
@@ -11,10 +14,14 @@ data:
   stead:
     # Noise data chunks
     noise_chunks: ["chunk1"]
+
     # Earthquake data chunks
     eq_chunks: ["chunk2", "chunk3", "chunk4", "chunk5", "chunk6"]
 
-# Processed data directory structure
+# =====================================================================
+# PROCESSED DATA DIRECTORY STRUCTURE (WEB DATASET .tar SHARDS)
+# Used by dataset.py → _get_split_dir() → build_dataset()
+# =====================================================================
 processed:
   # Full dataset directories
   all:
@@ -25,7 +32,7 @@ processed:
     # Test data directory
     test_dir:  "data/processed/all/test"
 
-  # Sample dataset directories
+  # Sample dataset directories (small smoke-test subset)
   sample:
     # Training data directory (sample)
     train_dir: "data/processed/sample/train"
@@ -34,12 +41,27 @@ processed:
     # Test data directory (sample)
     test_dir:  "data/processed/sample/test"
 
-# WebDataset configuration
+# =====================================================================
+# WEBDATASET CONFIGURATION
+# (tar shard naming; writing scripts can use this)
+# =====================================================================
 webdataset:
   shard_size: 2048                 # Number of samples per .tar file
+
   # Training data .tar file naming pattern
   train_pattern: "train_{:06d}.tar"
+
   # Validation data .tar file naming pattern
   val_pattern:   "val_{:06d}.tar"
+
   # Test data .tar file naming pattern
   test_pattern:  "test_{:06d}.tar"
+
+# =====================================================================
+# EXPERIMENTS / OUTPUT ROOT (OPTIONAL, FOR ORGANIZATION)
+# Trainer currently uses training.output_dir from config.yaml to
+# create experiments/exp_XXX, but this block keeps paths centralized.
+# =====================================================================
+experiments:
+  # Root directory under project folder where experiments will live
+  root_dir: "experiments"
