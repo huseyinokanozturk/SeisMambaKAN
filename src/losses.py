@@ -5,6 +5,8 @@ from typing import Any, Dict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch import amp
+
 
 
 class SeisMambaKANLoss(nn.Module):
@@ -206,37 +208,49 @@ class SeisMambaKANLoss(nn.Module):
         Compute detection loss.
 
         Assumes 'pred' has already passed through a sigmoid activation:
-            pred \in [0, 1].
+            pred in [0, 1].
 
-        Supports:
-          - plain BCE (with optional positive-class weighting)
-          - focal BCE variant
+        NOTE:
+            BCE with sigmoid outputs is not AMP-safe in half precision.
+            To avoid numerical issues and PyTorch warnings, this function
+            disables autocast and forces FP32 for the BCE computation.
         """
-        # Clamp predictions for numerical stability
-        pred = pred.clamp(self.det_eps, 1.0 - self.det_eps)
+        # Always compute BCE in full precision
+        with amp.autocast(enabled=False):
+            # Cast to float32 explicitly
+            pred_fp32 = pred.float()
+            target_fp32 = target.float()
 
-        # Base BCE loss per element
-        bce = F.binary_cross_entropy(pred, target, reduction="none")
+            # Clamp predictions for numerical stability
+            pred_fp32 = pred_fp32.clamp(self.det_eps, 1.0 - self.det_eps)
 
-        # Optional positive-class weighting
-        if self.det_positive_weight != 1.0 and self.det_positive_weight > 0.0:
-            pos_weight = torch.ones_like(target)
-            pos_weight = torch.where(
-                target > 0.5,
-                torch.full_like(target, self.det_positive_weight),
-                pos_weight,
+            # Base BCE loss per element
+            bce = F.binary_cross_entropy(
+                pred_fp32,
+                target_fp32,
+                reduction="none",
             )
-            bce = bce * pos_weight
 
-        # Optional focal modulation
-        if self.det_use_focal or self.det_loss_type == "focal_bce":
-            # pt is the probability assigned to the true class
-            pt = torch.where(target > 0.5, pred, 1.0 - pred)
-            focal_factor = (1.0 - pt) ** self.det_focal_gamma
-            # Standard focal formulation usually includes alpha; we fold it in here
-            bce = self.det_focal_alpha * focal_factor * bce
+            # Optional positive-class weighting
+            if self.det_positive_weight != 1.0 and self.det_positive_weight > 0.0:
+                pos_weight = torch.ones_like(target_fp32)
+                pos_weight = torch.where(
+                    target_fp32 > 0.5,
+                    torch.full_like(target_fp32, self.det_positive_weight),
+                    pos_weight,
+                )
+                bce = bce * pos_weight
 
-        return bce.mean()
+            # Optional focal modulation
+            if self.det_use_focal or self.det_loss_type == "focal_bce":
+                # pt is the probability assigned to the true class
+                pt = torch.where(target_fp32 > 0.5, pred_fp32, 1.0 - pred_fp32)
+                focal_factor = (1.0 - pt) ** self.det_focal_gamma
+                # Standard focal formulation usually includes alpha; we fold it in here
+                bce = self.det_focal_alpha * focal_factor * bce
+
+            return bce.mean()
+
 
     # --------------------------------------------------------------------- #
     # Phase loss: detection-masked, peak-weighted MSE
