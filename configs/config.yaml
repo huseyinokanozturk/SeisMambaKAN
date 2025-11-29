@@ -194,3 +194,58 @@ dataloader:
 
   # Whether to shuffle the training dataset each epoch.
   shuffle_train: true
+
+# =====================================================================
+# LOSS FUNCTION CONFIGURATION
+# =====================================================================
+
+loss:
+  # High-level type for logging / debugging
+  type: "multi_head_seismambakan"
+
+  # Which keys in the label dict correspond to each head
+  keys:
+    detection: "y_det"
+    p: "y_p"
+    s: "y_s"
+
+  # Global weights for each head in the final loss:
+  #   L_total = w_det * L_det + w_p * L_p + w_s * L_s
+  weights:
+    detection: 1.0    # lambda_det
+    p: 1.0            # lambda_P
+    s: 1.2            # lambda_S (slightly higher, as S is harder)
+
+  # --------------------------------------------------------------------------
+  # Detection head loss: weighted BCE (optionally focal)
+  # --------------------------------------------------------------------------
+  detection:
+    loss_type: "bce"        # ["bce", "focal_bce"] – plain BCE
+    positive_weight: 5.0    # weight for y=1 samples to handle imbalance
+    use_focal: false        # if true, use focal variant instead of plain BCE
+    focal_alpha: 0.25       # only used when use_focal = true
+    focal_gamma: 2.0        # focusing parameter for focal loss
+    eps: 1.0e-7             # numerical stability for log / clamp
+
+  # --------------------------------------------------------------------------
+  # Phase heads loss: detection-masked, peak-weighted MSE on Gaussian targets
+  # --------------------------------------------------------------------------
+  phase:
+    loss_type: "masked_peak_mse"  
+    # Peak weighting: w_t = 1 + peak_weight_scale * y_phase(t)
+    peak_weight_scale: 2.0        # k in w_t = 1 + k * y(t); tuneable
+    use_detection_mask: true      # multiply by detection label to focus on event window
+    normalize_by_mask: true       # divide by sum(mask * weights) instead of T
+    # Clamp predictions to [0, 1] before computing MSE (since labels are in [0, 1])
+    clamp_predictions: true
+    clamp_min: 0.0
+    clamp_max: 1.0
+    eps: 1.0e-6                   # for safe normalization
+
+  # --------------------------------------------------------------------------
+  # Optional center-based loss (soft-argmax on P/S), disabled for now
+  # --------------------------------------------------------------------------
+  center_loss:
+    enabled: false         # keep off in first experiments
+    weight: 0.0            # lambda_center; non-zero only if enabled = true
+    temperature: 10.0      # controls sharpness of soft-argmax over time axis
