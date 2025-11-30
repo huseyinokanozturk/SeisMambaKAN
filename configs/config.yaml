@@ -212,9 +212,9 @@ loss:
   # Global weights for each head in the final loss:
   #   L_total = w_det * L_det + w_p * L_p + w_s * L_s
   weights:
-    detection: 1.0    # lambda_det
-    p: 1.0            # lambda_P
-    s: 1.2            # lambda_S (slightly higher, as S is harder)
+    detection: 0.1    # lambda_det
+    p: 0.3            # lambda_P
+    s: 0.4            # lambda_S (slightly higher, as S is harder)
 
   # --------------------------------------------------------------------------
   # Detection head loss: weighted BCE (optionally focal)
