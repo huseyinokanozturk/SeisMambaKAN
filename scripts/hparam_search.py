@@ -25,10 +25,11 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 # -------------------------------------------------------------------------
-# Path + imports
+# Paths and imports
 # -------------------------------------------------------------------------
+
 THIS_DIR = Path(__file__).resolve().parent
-ROOT_DIR = THIS_DIR.parent
+ROOT_DIR = THIS_DIR.parent  # /content/SeisMambaKAN
 
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
@@ -39,8 +40,9 @@ from src.losses import build_loss_fn
 
 
 # -------------------------------------------------------------------------
-# Utility
+# Utils
 # -------------------------------------------------------------------------
+
 def set_global_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
@@ -48,13 +50,14 @@ def set_global_seed(seed: int) -> None:
 
 
 def clone_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    # Safe deep copy for config mutations
+    """Deep copy config so we can safely mutate it per trial."""
     return deepcopy(cfg)
 
 
 # -------------------------------------------------------------------------
-# Single trial training + validation
+# Single trial: train + validate for one (w_det, w_p, w_s)
 # -------------------------------------------------------------------------
+
 def run_single_trial(
     cfg_base: Dict[str, Any],
     paths_cfg: Dict[str, Any],
@@ -79,15 +82,24 @@ def run_single_trial(
     # Prepare config for this trial
     # ------------------------------------------------------------------
     cfg_trial = clone_cfg(cfg_base)
+
     loss_cfg = cfg_trial.setdefault("loss", {})
     weights_cfg = loss_cfg.setdefault("weights", {})
     weights_cfg["detection"] = float(w_det)
     weights_cfg["p"] = float(w_p)
     weights_cfg["s"] = float(w_s)
 
-    # (Optional) reduce num_workers for stability in Colab
+    # Ensure dataloader config exists; keep num_workers from base or default 1
+    base_dl_cfg = cfg_base.get("dataloader", {})
     dl_cfg = cfg_trial.setdefault("dataloader", {})
-    dl_cfg.setdefault("num_workers", cfg_base.get("dataloader", {}).get("num_workers", 1))
+    dl_cfg.setdefault("num_workers", int(base_dl_cfg.get("num_workers", 1)))
+    dl_cfg.setdefault("pin_memory", bool(base_dl_cfg.get("pin_memory", True)))
+    dl_cfg.setdefault(
+        "persistent_workers",
+        bool(base_dl_cfg.get("persistent_workers", True)),
+    )
+    dl_cfg.setdefault("prefetch_factor", int(base_dl_cfg.get("prefetch_factor", 2)))
+    dl_cfg.setdefault("drop_last", bool(base_dl_cfg.get("drop_last", True)))
 
     # ------------------------------------------------------------------
     # Dataloaders
@@ -114,7 +126,6 @@ def run_single_trial(
 
     loss_fn = build_loss_fn(cfg_trial)
 
-    # Optimizer config
     train_cfg = cfg_trial.get("training", {})
     lr = float(train_cfg.get("learning_rate", 3.0e-4))
 
@@ -126,9 +137,6 @@ def run_single_trial(
         lr=lr,
         weight_decay=weight_decay,
     )
-
-    # No AMP here: keep search loop simple and robust
-    scaler = None
 
     best_val_total = math.inf
     best_val_det = math.inf
@@ -143,19 +151,29 @@ def run_single_trial(
 
         pbar = tqdm(
             train_loader,
-            desc=f"[w_det={w_det:.2f}, w_p={w_p:.2f}, w_s={w_s:.2f}] Epoch {epoch}/{epochs} (train)",
+            desc=(
+                f"[det={w_det:.2f}, p={w_p:.2f}, s={w_s:.2f}] "
+                f"Epoch {epoch}/{epochs} (train)"
+            ),
             leave=False,
         )
 
         for batch in pbar:
-            x, labels = batch  # x: (B, T, C), labels: dict
+            x, labels = batch  # x: (B, T, C), labels: dict (labels + metadata)
 
-            x = x.to(device, dtype=torch.float32)
+            # Inputs -> device
+            x = x.to(device, non_blocking=True, dtype=torch.float32)
             if x.ndim == 3:
                 # (B, T, C) -> (B, C, T) for Conv1d
                 x = x.permute(0, 2, 1).contiguous()
 
-            labels_device = {k: v.to(device) for k, v in labels.items()}
+            # Labels -> device (only tensor fields)
+            labels_device: Dict[str, Any] = {}
+            for k, v in labels.items():
+                if isinstance(v, torch.Tensor):
+                    labels_device[k] = v.to(device, non_blocking=True)
+                else:
+                    labels_device[k] = v  # keep metadata as-is
 
             optimizer.zero_grad(set_to_none=True)
 
@@ -183,11 +201,16 @@ def run_single_trial(
             for batch in val_loader:
                 x, labels = batch
 
-                x = x.to(device, dtype=torch.float32)
+                x = x.to(device, non_blocking=True, dtype=torch.float32)
                 if x.ndim == 3:
                     x = x.permute(0, 2, 1).contiguous()
 
-                labels_device = {k: v.to(device) for k, v in labels.items()}
+                labels_device: Dict[str, Any] = {}
+                for k, v in labels.items():
+                    if isinstance(v, torch.Tensor):
+                        labels_device[k] = v.to(device, non_blocking=True)
+                    else:
+                        labels_device[k] = v
 
                 outputs = model(x)
                 loss_dict = loss_fn(outputs, labels_device)
@@ -204,10 +227,17 @@ def run_single_trial(
             best_val_det = avg_val_det
 
         print(
-            f"[w_det={w_det:.2f}, w_p={w_p:.2f}, w_s={w_s:.2f}] "
-            f"Epoch {epoch:03d} | train_total={avg_train_total:.4f} | "
-            f"val_total={avg_val_total:.4f} | val_det={avg_val_det:.4f}"
+            f"[det={w_det:.2f}, p={w_p:.2f}, s={w_s:.2f}] "
+            f"Epoch {epoch:03d} | "
+            f"train_total={avg_train_total:.4f} | "
+            f"val_total={avg_val_total:.4f} | "
+            f"val_det={avg_val_det:.4f}"
         )
+
+    # Clean up a bit
+    del model, optimizer, loss_fn, train_loader, val_loader
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     return best_val_total, best_val_det
 
@@ -215,6 +245,7 @@ def run_single_trial(
 # -------------------------------------------------------------------------
 # Main grid search
 # -------------------------------------------------------------------------
+
 def main() -> None:
     # -----------------------------
     # Paths and configs
@@ -230,9 +261,9 @@ def main() -> None:
     paths_cfg = load_yaml(paths_path)
     model_cfg = load_yaml(model_cfg_path)
 
-    # optional: force sample mode for faster search
-    data_cfg = cfg.setdefault("data", {})
-    data_cfg.setdefault("mode", "sample")
+    # Optional: force sample mode if you want faster search
+    # data_cfg = cfg.setdefault("data", {})
+    # data_cfg.setdefault("mode", "sample")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Device:", device)
@@ -243,13 +274,12 @@ def main() -> None:
     # -----------------------------
     # Search space
     # -----------------------------
-    # You can adjust these lists to expand / shrink the grid.
+    # You set these in your last run:
     det_values = [0.1, 1.0, 1.5]
     p_values = [0.3, 1.0, 2.0]
     s_values = [0.4, 1.0, 2.0]
 
-    # Number of epochs per combination
-    epochs_per_trial = 15
+    epochs_per_trial = 20  # can be increased if you want more reliable ranking
 
     print("Search space:")
     print("  detection weights:", det_values)
@@ -288,7 +318,8 @@ def main() -> None:
 
         print(
             f"[RESULT] weights det={w_det}, p={w_p}, s={w_s} "
-            f"=> best_val_total={best_val_total:.4f}, best_val_det={best_val_det:.4f}"
+            f"=> best_val_total={best_val_total:.4f}, "
+            f"best_val_det={best_val_det:.4f}"
         )
 
         # Objective: minimize total validation loss
