@@ -30,9 +30,16 @@ def _safe_div(numerator: float, denominator: float, eps: float = 1e-8) -> float:
     return float(numerator / (denominator + eps))
 
 
-def _format_float(x: float) -> float:
+def _format_float(x: float | None) -> Optional[float]:
     """Ensure floats are JSON-serializable (convert NumPy floats)."""
+    if x is None:
+        return None
     return float(x)
+
+
+# =============================================================================
+# Output / label head extraction
+# =============================================================================
 
 
 def _extract_heads_from_outputs(
@@ -98,6 +105,100 @@ def _extract_heads_from_outputs(
         )
 
     return outputs[det_key], outputs[p_key], outputs[s_key]
+
+
+def _extract_label_curves(
+    labels: Dict[str, Any]
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """
+    Extract detection, P and S ground-truth curves (and optional indices)
+    from a labels dict with flexible key names.
+
+    Returns
+    -------
+    det_true : np.ndarray of shape (B, 1, T)
+    p_true   : np.ndarray of shape (B, 1, T)
+    s_true   : np.ndarray of shape (B, 1, T)
+    p_idx_true_tensor : Optional[torch.Tensor] of shape (B,)
+    s_idx_true_tensor : Optional[torch.Tensor] of shape (B,)
+    """
+    if not isinstance(labels, dict):
+        raise TypeError(
+            f"Expected labels to be a dict, got {type(labels)} instead. "
+            "The dataset must return (x, labels_dict)."
+        )
+
+    keys = list(labels.keys())
+    lower_map = {k: k.lower() for k in keys}
+
+    def find_exact_label(candidates: List[str]) -> Optional[str]:
+        for cand in candidates:
+            if cand in labels:
+                return cand
+        return None
+
+    # Detection label key
+    det_label_key = find_exact_label(["det", "detection", "y_det", "y_detection", "label_det"])
+    if det_label_key is None:
+        # heuristic: any key containing "det"
+        for k, lk in lower_map.items():
+            if "det" in lk:
+                det_label_key = k
+                break
+
+    # P Gaussian label key
+    p_label_key = find_exact_label(["p_gauss", "p_target", "p_label", "gauss_p", "p"])
+    if p_label_key is None:
+        # heuristic: key containing "p" but not "s" or "det"
+        for k, lk in lower_map.items():
+            if "p" in lk and "s" not in lk and "det" not in lk:
+                p_label_key = k
+                break
+
+    # S Gaussian label key
+    s_label_key = find_exact_label(["s_gauss", "s_target", "s_label", "gauss_s", "s"])
+    if s_label_key is None:
+        # heuristic: key containing "s" but not "p" or "det"
+        for k, lk in lower_map.items():
+            if "s" in lk and "p" not in lk and "det" not in lk:
+                s_label_key = k
+                break
+
+    missing = []
+    if det_label_key is None:
+        missing.append("det")
+    if p_label_key is None:
+        missing.append("p_gauss")
+    if s_label_key is None:
+        missing.append("s_gauss")
+
+    if missing:
+        raise KeyError(
+            f"Could not infer label(s) {missing} from labels dict. "
+            f"Available keys: {list(labels.keys())}"
+        )
+
+    det_true_t = labels[det_label_key].detach().cpu()
+    p_true_t = labels[p_label_key].detach().cpu()
+    s_true_t = labels[s_label_key].detach().cpu()
+
+    det_true = det_true_t.numpy()
+    p_true = p_true_t.numpy()
+    s_true = s_true_t.numpy()
+
+    # Ensure (B, 1, T) layout
+    if det_true.ndim == 2:
+        det_true = det_true[:, None, :]
+    if p_true.ndim == 2:
+        p_true = p_true[:, None, :]
+    if s_true.ndim == 2:
+        s_true = s_true[:, None, :]
+
+    # Optional explicit indices
+    p_idx_true_tensor = labels.get("p_idx", None)
+    s_idx_true_tensor = labels.get("s_idx", None)
+
+    return det_true, p_true, s_true, p_idx_true_tensor, s_idx_true_tensor
 
 
 # =============================================================================
@@ -473,35 +574,6 @@ def evaluate_model_on_loader(
 
     This function is designed to be called from scripts/ (e.g., eval_val.py),
     after loading the model weights and constructing the corresponding loader.
-
-    Parameters
-    ----------
-    model : torch.nn.Module
-        Trained SeisMambaKAN model in evaluation mode.
-    data_loader : DataLoader
-        Validation or test DataLoader. It must yield (x, labels) where:
-            x      : (B, T, C) float tensor
-            labels : dict containing at least:
-                     - "det"      : (B, 1, T) detection labels in [0, 1]
-                     - "p_gauss"  : (B, 1, T) P Gaussian targets
-                     - "s_gauss"  : (B, 1, T) S Gaussian targets
-                     If explicit indices are available, you may add:
-                     - "p_idx"    : (B,) int32 tensor
-                     - "s_idx"    : (B,) int32 tensor
-    device : torch.device
-        Device on which to run inference.
-    main_cfg : dict
-        Parsed main configuration (config.yaml). Must contain a "metrics" block.
-    split_name : str, optional
-        Name of the evaluated split ("val", "test", etc.), used for filenames.
-    exp_dir : Path, optional
-        Path to the experiment directory. If provided, metrics and per-trace
-        results will be saved under exp_dir / metrics_cfg["eval"]["output_dir"].
-
-    Returns
-    -------
-    metrics : dict
-        Aggregated metrics dictionary suitable for logging and JSON export.
     """
     metrics_cfg = main_cfg.get("metrics", {})
     sample_rate = float(metrics_cfg.get("sample_rate", 100.0))
@@ -579,13 +651,10 @@ def evaluate_model_on_loader(
         if s_pred.ndim == 2:
             s_pred = s_pred[:, None, :]
 
-        det_true = labels["det"].detach().cpu().numpy()         # (B, 1, T)
-        p_gauss_true = labels["p_gauss"].detach().cpu().numpy() # (B, 1, T)
-        s_gauss_true = labels["s_gauss"].detach().cpu().numpy() # (B, 1, T)
-
-        # Optional ground-truth indices
-        p_idx_true_tensor = labels.get("p_idx", None)
-        s_idx_true_tensor = labels.get("s_idx", None)
+        # Extract labels (robust to different key names)
+        det_true, p_gauss_true, s_gauss_true, p_idx_true_tensor, s_idx_true_tensor = (
+            _extract_label_curves(labels)
+        )
 
         B = det_true.shape[0]
 
