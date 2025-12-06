@@ -249,3 +249,85 @@ loss:
     enabled: false         # keep off in first experiments
     weight: 0.0            # lambda_center; non-zero only if enabled = true
     temperature: 10.0      # controls sharpness of soft-argmax over time axis
+
+metrics:
+  # ============================================================================
+  # General Settings
+  # ============================================================================
+  sample_rate: 100.0              # Sampling frequency in Hz (STEAD default).
+  window_length: 6000             # Number of samples per waveform segment.
+
+  # ============================================================================
+  # Detection Evaluation Settings
+  # ============================================================================
+  detection:
+    # Threshold for deciding whether a trace contains an earthquake event.
+    # If max(det_prob) >= trace_threshold → event is detected.
+    trace_threshold: 0.5
+
+    # Threshold used for per-sample (time-step) binary classification
+    # when computing frame-level precision/recall/F1.
+    timestep_threshold: 0.5
+
+  # ============================================================================
+  # Phase Picker Settings (P/S Estimation)
+  # ============================================================================
+  picker:
+    # If true, restrict P/S search region to the part of the trace where
+    # detection probabilities exceed det_window_threshold.
+    use_detection_window: true
+
+    # Minimum detection probability for a time sample to be included in the
+    # detection-based search window.
+    det_window_threshold: 0.3
+
+    # Minimum required Gaussian amplitude for accepting a predicted P or S pick.
+    # If the maximum Gaussian value is below this threshold, the phase is rejected.
+    p_amp_threshold: 0.1
+    s_amp_threshold: 0.1
+
+    # Optional constraints for stabilizing phase picking.
+    # Minimum allowed P–S time separation in seconds.
+    min_ps_gap_sec: 0.02
+
+    # Additional padding (in seconds) around the detection window to expand
+    # the candidate search region for P/S phases.
+    max_search_pad_sec: 0.5
+
+  # ============================================================================
+  # Phase Pick Error Tolerances (Used for Reporting Accuracy)
+  # ============================================================================
+  phase_tolerance:
+    # Thresholds (in seconds) used for computing hit-rate statistics.
+    # Example:
+    #   hit_rate_small = percentage(|error| < small)
+    #   hit_rate_medium = percentage(|error| < medium)
+    #   hit_rate_large = percentage(|error| < large)
+    p:
+      small: 0.01
+      medium: 0.02
+      large: 0.05
+
+    s:
+      small: 0.01
+      medium: 0.02
+      large: 0.05
+
+  # ============================================================================
+  # Evaluation Output Configuration
+  # ============================================================================
+  eval:
+    # Number of batches to evaluate. If null, the entire validation/test
+    # dataset will be used.
+    max_batches: null
+
+    # Save final aggregated metrics as JSON (e.g., val_metrics.json).
+    save_json: true
+
+    # If true, save per-trace metrics (detection outcome, P/S picks, errors)
+    # into a CSV file for detailed analysis.
+    save_per_trace_csv: false
+
+    # Directory name (within the experiment folder) where evaluation outputs
+    # will be stored.
+    output_dir: "metrics"
