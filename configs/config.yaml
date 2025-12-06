@@ -8,7 +8,7 @@
 data:
   # Dataset mode: "all" uses the full cleaned dataset,
   # "sample" uses a smaller subset mainly for debugging and smoke tests.
-  mode: "sample"              # "all" or "sample"
+  mode: "all"              # "all" or "sample"
 
   # Total number of samples to draw when mode == "sample".
   sample_size: 1300
