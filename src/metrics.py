@@ -9,6 +9,7 @@ import json
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+import matplotlib.pyplot as plt
 
 # =============================================================================
 # Utility functions
@@ -264,13 +265,9 @@ def pick_phases(
 
     # -------------------------------------------------------------------------
     # Trace-level event decision
-    # (Whether this window contains an earthquake or just noise)
     # -------------------------------------------------------------------------
     det_max = float(det.max()) if T > 0 else 0.0
-
-    # Note: event vs noise decision itself is handled in detection metrics.
-    # Here we simply report det_max and always attempt picking if curves are valid.
-    has_event_pred = True  # picker is agnostic; external code interprets det_max
+    has_event_pred = True  # picker itself is agnostic; detection metrics decide
 
     # -------------------------------------------------------------------------
     # Detection-based search window
@@ -356,30 +353,10 @@ def compute_detection_metrics(
 ) -> Dict[str, Any]:
     """
     Compute detection metrics at both trace-level and (optionally) time-step level.
-
-    Parameters
-    ----------
-    y_event_true : list of int
-        Ground-truth event labels per trace (0 = noise, 1 = event).
-    y_event_pred : list of int
-        Predicted event labels per trace.
-    y_ts_true : np.ndarray, optional
-        Flattened ground-truth detection labels per time-step (0/1).
-    y_ts_pred : np.ndarray, optional
-        Flattened predicted detection labels per time-step (0/1).
-
-    Returns
-    -------
-    metrics : dict
-        Dictionary with keys:
-            "trace"    : dict of accuracy, precision, recall, f1, specificity
-            "timestep" : dict (only if y_ts_true and y_ts_pred are provided)
     """
     assert len(y_event_true) == len(y_event_pred), "Mismatched trace-level lengths."
 
-    # -------------------------------------------------------------------------
     # Trace-level confusion matrix
-    # -------------------------------------------------------------------------
     tp = fp = tn = fn = 0
 
     for y_t, y_p in zip(y_event_true, y_event_pred):
@@ -414,9 +391,7 @@ def compute_detection_metrics(
         }
     }
 
-    # -------------------------------------------------------------------------
     # Time-step level metrics (optional)
-    # -------------------------------------------------------------------------
     if y_ts_true is not None and y_ts_pred is not None:
         y_ts_true = np.asarray(y_ts_true).astype(int).reshape(-1)
         y_ts_pred = np.asarray(y_ts_pred).astype(int).reshape(-1)
@@ -463,28 +438,9 @@ def compute_phase_metrics(
 ) -> Dict[str, Any]:
     """
     Compute phase picking metrics (MAE, median AE, STD, hit-rates, etc.).
-
-    Parameters
-    ----------
-    phase_name : {"p", "s"}
-        Phase identifier used for selecting tolerance configuration.
-    gt_indices : list of int
-        Ground-truth phase indices (samples) for traces that contain an event.
-    pred_indices : list of Optional[int]
-        Predicted phase indices (samples). None indicates a missing pick.
-    sample_rate : float
-        Sampling frequency in Hz.
-    tolerance_cfg : dict
-        metrics["phase_tolerance"] configuration dict.
-
-    Returns
-    -------
-    metrics : dict
-        Dictionary containing error statistics and hit-rates.
     """
     assert len(gt_indices) == len(pred_indices), "Mismatched phase index lists."
 
-    # Select phase-specific tolerance thresholds
     phase_tol = tolerance_cfg.get(phase_name, {})
     tol_small = float(phase_tol.get("small", 0.01))
     tol_medium = float(phase_tol.get("medium", 0.02))
@@ -505,7 +461,6 @@ def compute_phase_metrics(
     num_pred = picked_count
 
     if len(errors_sec) == 0:
-        # No valid picks; return metrics with NaNs
         return {
             "num_gt": int(num_gt),
             "num_pred": int(num_pred),
@@ -553,6 +508,134 @@ def compute_phase_metrics(
 
 
 # =============================================================================
+# Visualization helpers (random + worst-3 examples)
+# =============================================================================
+
+
+def _plot_single_example(
+    trace: Dict[str, Any],
+    sample_rate: float,
+    out_path: Path,
+    title: str,
+) -> None:
+    """
+    Plot detection, P and S curves for a single example and save as PNG.
+    """
+    det_true = trace["det_true"]
+    det_pred = trace["det_pred"]
+    p_true = trace["p_true"]
+    p_pred = trace["p_pred"]
+    s_true = trace["s_true"]
+    s_pred = trace["s_pred"]
+
+    p_idx_true = trace["p_idx_true"]
+    s_idx_true = trace["s_idx_true"]
+    p_idx_pred = trace["p_idx_pred"]
+    s_idx_pred = trace["s_idx_pred"]
+
+    T = det_true.shape[0]
+    t = np.arange(T) / sample_rate
+
+    fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+
+    # Detection
+    ax = axes[0]
+    ax.plot(t, det_true, label="Detection (GT)", linewidth=1.0)
+    ax.plot(t, det_pred, label="Detection (Pred)", linewidth=1.0, linestyle="--")
+    ax.set_ylabel("Det prob")
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper right", fontsize=8)
+
+    # P-phase
+    ax = axes[1]
+    ax.plot(t, p_true, label="P Gaussian (GT)", linewidth=1.0)
+    ax.plot(t, p_pred, label="P Gaussian (Pred)", linewidth=1.0, linestyle="--")
+
+    if p_idx_true is not None:
+        ax.axvline(p_idx_true / sample_rate, color="g", linestyle="-", linewidth=1.0, label="P GT")
+    if p_idx_pred is not None:
+        ax.axvline(p_idx_pred / sample_rate, color="r", linestyle="--", linewidth=1.0, label="P Pred")
+
+    ax.set_ylabel("P amplitude")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper right", fontsize=8)
+
+    # S-phase
+    ax = axes[2]
+    ax.plot(t, s_true, label="S Gaussian (GT)", linewidth=1.0)
+    ax.plot(t, s_pred, label="S Gaussian (Pred)", linewidth=1.0, linestyle="--")
+
+    if s_idx_true is not None:
+        ax.axvline(s_idx_true / sample_rate, color="g", linestyle="-", linewidth=1.0, label="S GT")
+    if s_idx_pred is not None:
+        ax.axvline(s_idx_pred / sample_rate, color="r", linestyle="--", linewidth=1.0, label="S Pred")
+
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("S amplitude")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper right", fontsize=8)
+
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+
+
+def _save_example_plots(
+    event_traces: List[Dict[str, Any]],
+    sample_rate: float,
+    out_dir: Path,
+    split_name: str,
+) -> None:
+    """
+    Save:
+      - one random event example
+      - three worst event examples (by max(P_abs_err, S_abs_err))
+    as PNG files into the metrics directory.
+    """
+    if not event_traces:
+        return
+
+    rng = np.random.RandomState(42)
+
+    # Random example
+    rand_idx = int(rng.randint(0, len(event_traces)))
+    rand_trace = event_traces[rand_idx]
+    rand_path = out_dir / f"{split_name}_random_example.png"
+
+    _plot_single_example(
+        trace=rand_trace,
+        sample_rate=sample_rate,
+        out_path=rand_path,
+        title=f"{split_name.upper()} - Random Example (idx={rand_idx})",
+    )
+
+    # Worst-3 by error (combined P/S absolute error)
+    scores = []
+    for tr in event_traces:
+        p_err = tr.get("p_abs_err_sec", None)
+        s_err = tr.get("s_abs_err_sec", None)
+        p_val = p_err if p_err is not None else 0.0
+        s_val = s_err if s_err is not None else 0.0
+        scores.append(max(p_val, s_val))
+
+    scores = np.asarray(scores, dtype=float)
+    order = np.argsort(scores)  # ascending
+    worst_indices = order[-3:]  # last 3 = largest errors
+
+    for rank, idx in enumerate(reversed(worst_indices), start=1):
+        tr = event_traces[int(idx)]
+        out_path = out_dir / f"{split_name}_worst_{rank}.png"
+        _plot_single_example(
+            trace=tr,
+            sample_rate=sample_rate,
+            out_path=out_path,
+            title=f"{split_name.upper()} - Worst #{rank} (err={scores[idx]:.3f} s)",
+        )
+
+
+# =============================================================================
 # High-level evaluation on a DataLoader
 # =============================================================================
 
@@ -571,9 +654,7 @@ def evaluate_model_on_loader(
       - trace-level detection metrics
       - time-step-level detection metrics
       - P and S phase picking metrics (MAE, MedAE, STD, hit-rates)
-
-    This function is designed to be called from scripts/ (e.g., eval_val.py),
-    after loading the model weights and constructing the corresponding loader.
+      - diagnostic plots for one random and three worst event examples
     """
     metrics_cfg = main_cfg.get("metrics", {})
     sample_rate = float(metrics_cfg.get("sample_rate", 100.0))
@@ -620,6 +701,9 @@ def evaluate_model_on_loader(
     # Optional per-trace rows for CSV
     per_trace_rows: List[Dict[str, Any]] = []
 
+    # For visualization: store event traces with all curves and errors
+    event_traces: List[Dict[str, Any]] = []
+
     # -------------------------------------------------------------------------
     # Main evaluation loop
     # -------------------------------------------------------------------------
@@ -636,7 +720,7 @@ def evaluate_model_on_loader(
         with torch.amp.autocast(device_type=device_type, enabled=False):
             outputs = model(x)
 
-        # Extract detection and phase outputs (robust to different key names)
+        # Model outputs (robust head extraction)
         det_out, p_out, s_out = _extract_heads_from_outputs(outputs)
 
         det_pred = det_out.detach().cpu().numpy()  # (B, 1, T) or (B, T)
@@ -651,7 +735,7 @@ def evaluate_model_on_loader(
         if s_pred.ndim == 2:
             s_pred = s_pred[:, None, :]
 
-        # Extract labels (robust to different key names)
+        # Labels (robust extraction)
         det_true, p_gauss_true, s_gauss_true, p_idx_true_tensor, s_idx_true_tensor = (
             _extract_label_curves(labels)
         )
@@ -666,34 +750,26 @@ def evaluate_model_on_loader(
             p_gauss_true_i = p_gauss_true[i, 0]
             s_gauss_true_i = s_gauss_true[i, 0]
 
-            # -----------------------------------------------------------------
-            # Ground-truth event / noise label per trace
-            # -----------------------------------------------------------------
-            # If an explicit event flag is not provided, we infer it from labels:
-            # any detection > 0.5 or non-zero P/S Gaussian.
+            # Ground-truth event / noise per trace
             gt_event_flag = int(
                 (det_true_i.max() >= 0.5)
                 or (p_gauss_true_i.max() > 0.0)
                 or (s_gauss_true_i.max() > 0.0)
             )
 
-            # Predicted event / noise per trace (trace-level decision)
+            # Predicted event / noise per trace
             pred_event_flag = int(det_pred_i.max() >= trace_threshold)
 
             y_event_true.append(gt_event_flag)
             y_event_pred.append(pred_event_flag)
 
-            # -----------------------------------------------------------------
             # Time-step level detection labels
-            # -----------------------------------------------------------------
             y_ts_true = (det_true_i >= 0.5).astype(int)
             y_ts_pred = (det_pred_i >= timestep_threshold).astype(int)
             y_ts_true_list.append(y_ts_true)
             y_ts_pred_list.append(y_ts_pred)
 
-            # -----------------------------------------------------------------
             # Ground-truth phase indices
-            # -----------------------------------------------------------------
             if p_idx_true_tensor is not None:
                 p_idx_true = int(p_idx_true_tensor[i].item())
             else:
@@ -704,14 +780,12 @@ def evaluate_model_on_loader(
             else:
                 s_idx_true = int(np.argmax(s_gauss_true_i))
 
-            # Only consider traces with an event for phase metrics
+            # Only consider event traces for phase metrics and plots
             if gt_event_flag == 1:
                 p_gt_indices.append(p_idx_true)
                 s_gt_indices.append(s_idx_true)
 
-            # -----------------------------------------------------------------
             # Phase picking on predicted curves
-            # -----------------------------------------------------------------
             pick_result = pick_phases(
                 det_curve=det_pred_i,
                 p_curve=p_pred_i,
@@ -727,9 +801,41 @@ def evaluate_model_on_loader(
                 p_pred_indices.append(p_idx_pred)
                 s_pred_indices.append(s_idx_pred)
 
-            # -----------------------------------------------------------------
-            # Optional per-trace row
-            # -----------------------------------------------------------------
+                # Compute errors for visualization ranking
+                p_err_sec = None
+                p_abs_err_sec = None
+                if p_idx_pred is not None:
+                    p_err_samples = int(p_idx_pred) - int(p_idx_true)
+                    p_err_sec = p_err_samples / sample_rate
+                    p_abs_err_sec = abs(p_err_sec)
+
+                s_err_sec = None
+                s_abs_err_sec = None
+                if s_idx_pred is not None:
+                    s_err_samples = int(s_idx_pred) - int(s_idx_true)
+                    s_err_sec = s_err_samples / sample_rate
+                    s_abs_err_sec = abs(s_err_sec)
+
+                event_traces.append(
+                    {
+                        "det_true": det_true_i.copy(),
+                        "det_pred": det_pred_i.copy(),
+                        "p_true": p_gauss_true_i.copy(),
+                        "p_pred": p_pred_i.copy(),
+                        "s_true": s_gauss_true_i.copy(),
+                        "s_pred": s_pred_i.copy(),
+                        "p_idx_true": p_idx_true,
+                        "s_idx_true": s_idx_true,
+                        "p_idx_pred": p_idx_pred,
+                        "s_idx_pred": s_idx_pred,
+                        "p_err_sec": p_err_sec,
+                        "p_abs_err_sec": p_abs_err_sec,
+                        "s_err_sec": s_err_sec,
+                        "s_abs_err_sec": s_abs_err_sec,
+                    }
+                )
+
+            # Optional per-trace CSV row
             if save_per_trace_csv:
                 row = {
                     "split": split_name,
@@ -793,7 +899,7 @@ def evaluate_model_on_loader(
     }
 
     # -------------------------------------------------------------------------
-    # Save outputs (JSON + CSV) if requested
+    # Save outputs (JSON + CSV + PNG figures) if requested
     # -------------------------------------------------------------------------
     if metrics_out_dir is not None:
         if save_json:
@@ -809,5 +915,13 @@ def evaluate_model_on_loader(
                 writer.writeheader()
                 for row in per_trace_rows:
                     writer.writerow(row)
+
+        # Diagnostic plots
+        _save_example_plots(
+            event_traces=event_traces,
+            sample_rate=sample_rate,
+            out_dir=metrics_out_dir,
+            split_name=split_name,
+        )
 
     return metrics
