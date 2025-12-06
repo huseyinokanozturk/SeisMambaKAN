@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import time
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
@@ -17,16 +18,17 @@ from .models.network import SeisMambaKAN
 
 
 # =============================================================================
-# Utility helpers
+# Utilities
 # =============================================================================
 
 
 def set_global_seed(seed: int) -> None:
-    """Set global random seeds for reproducibility."""
+    """Set all major RNG seeds for reproducibility."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
     # cuDNN settings: allow benchmark for speed, but keep deterministic off
     torch.backends.cudnn.deterministic = False
@@ -44,33 +46,23 @@ def prepare_experiment_dirs(root: Path | str = "experiments") -> Tuple[Path, Pat
     """
     Create a new experiment directory with incremental naming:
 
-        experiments/exp_001
-        experiments/exp_002
+        root / exp_001
+        root / exp_002
         ...
 
-    Inside each experiment directory:
-        - best_model.pth
-        - config_used.yaml
-        - events.out.tfevents*  (TensorBoard)
-        - logs.txt
-        - checkpoints/          (epoch checkpoints)
-
-    Returns:
-        exp_dir:  path to the new experiment directory
-        ckpt_dir: path to the checkpoints subdirectory
+    Returns (exp_dir, ckpt_dir).
     """
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
 
-    # Collect existing experiment indices
-    existing_indices: list[int] = []
-    for p in root.iterdir():
-        if p.is_dir() and p.name.startswith("exp_"):
-            try:
-                idx = int(p.name.split("_")[1])
-                existing_indices.append(idx)
-            except (IndexError, ValueError):
-                continue
+    existing = [d for d in root.iterdir() if d.is_dir() and d.name.startswith("exp_")]
+    existing_indices = []
+    for d in existing:
+        try:
+            idx = int(d.name.split("_")[-1])
+            existing_indices.append(idx)
+        except ValueError:
+            continue
 
     next_idx = (max(existing_indices) if existing_indices else 0) + 1
     exp_name = f"exp_{next_idx:03d}"
@@ -88,20 +80,7 @@ def build_model_and_loss(
     model_cfg: Dict[str, Any],
     device: torch.device,
 ) -> Tuple[torch.nn.Module, torch.nn.Module, bool, bool]:
-    """
-    Build SeisMambaKAN model and loss function based on the provided configs.
-
-    Returns:
-        model:                 the initialized model on the target device
-        loss_fn:               configured loss module
-        use_amp:               whether to use mixed precision
-        use_channels_last:     whether channels_last is requested in config
-
-    Note:
-        channels_last is only meaningful for 4D tensors (N, C, H, W) used in
-        Conv2d. Since the current architecture is Conv1d with shapes (B, C, T),
-        the trainer will only apply channels_last when a 4D input is detected.
-    """
+    """Build model and loss function from configs, move model to device."""
     model = SeisMambaKAN(model_cfg)
     model = model.to(device)
 
@@ -156,6 +135,8 @@ class Trainer:
         ckpt_dir: Path,
         use_amp: bool,
         use_channels_last: bool,
+        mirror_exp_dir: Path | None = None,
+        mirror_ckpt_dir: Path | None = None,
     ) -> None:
         self.model = model
         self.loss_fn = loss_fn
@@ -170,6 +151,10 @@ class Trainer:
         self.ckpt_dir = ckpt_dir
         self.use_amp = use_amp
 
+        # Optional mirror directories (e.g., Google Drive) for experiments/checkpoints
+        self.mirror_exp_dir = mirror_exp_dir
+        self.mirror_ckpt_dir = mirror_ckpt_dir
+
         self.train_cfg = main_cfg.get("training", {})
         self.dataloader_cfg = main_cfg.get("dataloader", {})
         self.loss_cfg = main_cfg.get("loss", {})
@@ -183,15 +168,36 @@ class Trainer:
         # Summary writer for TensorBoard (events.out.tfevents)
         self.writer = SummaryWriter(log_dir=str(self.exp_dir))
 
-        # Log file
+        # Log file (local experiment dir)
         self.log_file_path = self.exp_dir / "logs.txt"
         self._log_file = self.log_file_path.open("a", encoding="utf-8")
 
+        # Optional mirrored log file (e.g., on Drive)
+        self._mirror_log_file = None
+        if self.mirror_exp_dir is not None:
+            self.mirror_exp_dir.mkdir(parents=True, exist_ok=True)
+            mirror_log_path = self.mirror_exp_dir / "logs.txt"
+            self._mirror_log_file = mirror_log_path.open("a", encoding="utf-8")
+
+        # Best validation loss seen so far
         self.best_val_loss: float = float("inf")
+
+        # Step/epoch counters for ETA logging
+        self.steps_per_epoch: int = len(self.train_loader)
+        self.total_epochs: int = int(self.train_cfg.get("epochs", 1))
+        self.total_steps: int = self.steps_per_epoch * self.total_epochs
 
     # ------------------------------------------------------------------
     # Core utilities
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _format_seconds(seconds: float) -> str:
+        """Convert seconds (float) into a HH:MM:SS string."""
+        seconds = int(seconds)
+        m, s = divmod(seconds, 60)
+        h, m = divmod(m, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
 
     def _prepare_inputs(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -210,7 +216,7 @@ class Trainer:
         x = x.to(self.device, non_blocking=True)
 
         if x.dim() == 3:
-            # (B, T, C) -> (B, C, T) for Conv1d
+            # (B, T, C) -> (B, C, T)
             x = x.permute(0, 2, 1).contiguous()
             # channels_last is not defined for 3D tensors; ignore flag here.
             return x
@@ -238,10 +244,15 @@ class Trainer:
         return out
 
     def _log(self, message: str) -> None:
-        """Append a message to logs.txt and print it."""
+        """Append a message to logs.txt (and mirror, if any) and print it."""
         print(message)
+        # Local log
         self._log_file.write(message + "\n")
         self._log_file.flush()
+        # Optional mirrored log (e.g., on Drive)
+        if self._mirror_log_file is not None:
+            self._mirror_log_file.write(message + "\n")
+            self._mirror_log_file.flush()
 
     # ------------------------------------------------------------------
     # Training / validation loop
@@ -394,18 +405,32 @@ class Trainer:
             "paths_config": self.paths_cfg,
         }
 
-        # Per-epoch checkpoint
+        # Per-epoch checkpoint (local)
         epoch_ckpt_path = self.ckpt_dir / f"checkpoint_epoch_{epoch:03d}.pth"
         torch.save(state, epoch_ckpt_path)
 
-        # Last checkpoint (overwritten each epoch)
+        # Last checkpoint (overwritten each epoch, local)
         last_ckpt_path = self.ckpt_dir / "last.pth"
         torch.save(state, last_ckpt_path)
+
+        # Optional mirrored checkpoints (e.g., on Drive)
+        if self.mirror_ckpt_dir is not None:
+            self.mirror_ckpt_dir.mkdir(parents=True, exist_ok=True)
+            mirror_epoch_ckpt_path = self.mirror_ckpt_dir / f"checkpoint_epoch_{epoch:03d}.pth"
+            torch.save(state, mirror_epoch_ckpt_path)
+            mirror_last_ckpt_path = self.mirror_ckpt_dir / "last.pth"
+            torch.save(state, mirror_last_ckpt_path)
 
         if is_best:
             # Save only model weights as best_model.pth in experiment root
             best_model_path = self.exp_dir / "best_model.pth"
             torch.save(self.model.state_dict(), best_model_path)
+
+            # Also mirror best model weights if a mirror experiment dir exists
+            if self.mirror_exp_dir is not None:
+                self.mirror_exp_dir.mkdir(parents=True, exist_ok=True)
+                mirror_best_model_path = self.mirror_exp_dir / "best_model.pth"
+                torch.save(self.model.state_dict(), mirror_best_model_path)
 
     # ------------------------------------------------------------------
     # Main training loop
@@ -416,12 +441,29 @@ class Trainer:
 
         self._log(f"Starting training for {num_epochs} epochs.")
         self._log(f"Experiment directory: {self.exp_dir}")
+        if self.mirror_exp_dir is not None:
+            self._log(f"Mirror experiment directory: {self.mirror_exp_dir}")
         self._log(f"Device: {self.device.type}, AMP: {self.use_amp}")
         self._log(f"use_channels_last (4D only): {self.channels_last}")
+        self._log(
+            f"Steps per epoch: {self.steps_per_epoch}, total steps: {self.total_steps}"
+        )
+
+        # Global timer for ETA estimation
+        start_time = time.time()
 
         for epoch in range(1, num_epochs + 1):
+            epoch_start = time.time()
+
             train_metrics = self.train_one_epoch(epoch)
             val_metrics = self.validate_one_epoch(epoch)
+
+            # Timing information
+            epoch_time = time.time() - epoch_start
+            elapsed = time.time() - start_time
+            avg_epoch_time = elapsed / epoch
+            remaining_epochs = num_epochs - epoch
+            eta = avg_epoch_time * remaining_epochs
 
             log_msg = (
                 f"[Epoch {epoch:03d}] "
@@ -429,20 +471,44 @@ class Trainer:
                 f"Val total={val_metrics['total']:.4f}, "
                 f"Val det={val_metrics['detection']:.4f}, "
                 f"Val p={val_metrics['p']:.4f}, "
-                f"Val s={val_metrics['s']:.4f}"
+                f"Val s={val_metrics['s']:.4f} | "
+                f"epoch_time={self._format_seconds(epoch_time)} | "
+                f"elapsed={self._format_seconds(elapsed)} | "
+                f"eta={self._format_seconds(eta)}"
             )
             self._log(log_msg)
 
             current_val = val_metrics["total"]
             is_best = current_val < self.best_val_loss
             if is_best:
+                prev_best = self.best_val_loss
                 self.best_val_loss = current_val
+
+                # Log best checkpoint info
+                best_ckpt_path = self.ckpt_dir / f"checkpoint_epoch_{epoch:03d}.pth"
+                best_model_path = self.exp_dir / "best_model.pth"
+                msg = (
+                    f"[Epoch {epoch:03d}] New best val_total={current_val:.4f} "
+                    f"(prev={prev_best:.4f}). "
+                    f"Checkpoint saved to {best_ckpt_path}, best_model to {best_model_path}"
+                )
+                if self.mirror_ckpt_dir is not None and self.mirror_exp_dir is not None:
+                    mirror_best_ckpt_path = (
+                        self.mirror_ckpt_dir / f"checkpoint_epoch_{epoch:03d}.pth"
+                    )
+                    mirror_best_model_path = self.mirror_exp_dir / "best_model.pth"
+                    msg += (
+                        f" (mirrored to {mirror_best_ckpt_path} and {mirror_best_model_path})"
+                    )
+                self._log(msg)
 
             self._save_checkpoint(epoch, val_metrics, is_best=is_best)
 
         # Close resources
         self.writer.close()
         self._log_file.close()
+        if self._mirror_log_file is not None:
+            self._mirror_log_file.close()
 
 
 # =============================================================================
@@ -480,12 +546,33 @@ def main() -> None:
     set_global_seed(seed)
 
     # ------------------------------------------------------------------
-    # Experiment directories
+    # Experiment directories (local + optional mirror, e.g., Google Drive)
     # ------------------------------------------------------------------
-    exp_root = Path(train_cfg.get("output_dir", "experiments"))
+    experiments_cfg = paths_cfg.get("experiments", {})
+
+    # training.output_dir has highest priority; otherwise fall back to paths.yaml
+    exp_root = Path(
+        train_cfg.get(
+            "output_dir",
+            experiments_cfg.get("root_dir", "experiments"),
+        )
+    )
     exp_dir, ckpt_dir = prepare_experiment_dirs(exp_root)
 
-    # Save merged config into config_used.yaml inside the experiment folder
+    # Optional mirror root on Drive, configured in paths.yaml as:
+    # experiments:
+    #   root_dir: "experiments"
+    #   drive_root_dir: "/content/drive/MyDrive/Proje_SeisMamba/SeisMambaKAN/experiments"
+    mirror_exp_dir = None
+    mirror_ckpt_dir = None
+    drive_root_dir = experiments_cfg.get("drive_root_dir")
+    if drive_root_dir:
+        drive_root_path = Path(drive_root_dir)
+        mirror_exp_dir = drive_root_path / exp_dir.name
+        mirror_ckpt_dir = mirror_exp_dir / "checkpoints"
+        mirror_ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save merged config into config_used.yaml inside experiment folder(s)
     import yaml
 
     merged_config = {
@@ -493,9 +580,13 @@ def main() -> None:
         "model": model_cfg,
         "paths": paths_cfg,
     }
-    config_used_path = exp_dir / "config_used.yaml"
-    with config_used_path.open("w", encoding="utf-8") as f:
-        yaml.safe_dump(merged_config, f, sort_keys=False)
+    for out_dir in (exp_dir, mirror_exp_dir):
+        if out_dir is None:
+            continue
+        out_dir.mkdir(parents=True, exist_ok=True)
+        config_used_path = out_dir / "config_used.yaml"
+        with config_used_path.open("w", encoding="utf-8") as f:
+            yaml.safe_dump(merged_config, f, sort_keys=False)
 
     # ------------------------------------------------------------------
     # Dataloaders
@@ -540,6 +631,8 @@ def main() -> None:
         ckpt_dir=ckpt_dir,
         use_amp=use_amp,
         use_channels_last=use_channels_last,
+        mirror_exp_dir=mirror_exp_dir,
+        mirror_ckpt_dir=mirror_ckpt_dir,
     )
 
     trainer.fit()
