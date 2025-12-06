@@ -14,7 +14,7 @@ def main():
 
     # Build model + load checkpoint
     model = SeisMambaKAN(model_cfg).to(device)
-    state = torch.load("experiments/exp_005/checkpoints/best_model.pth", map_location=device)
+    state = torch.load("/content/drive/MyDrive/Proje_SeisMamba/SeisMambaKAN/experiments/exp_005/best_model.pth", map_location=device)
     model.load_state_dict(state)
 
     # Build val loader
@@ -25,7 +25,7 @@ def main():
         is_train=False,
     )
 
-    exp_dir = Path("experiments/exp_005")
+    exp_dir = Path("/content/drive/MyDrive/Proje_SeisMamba/SeisMambaKAN/experiments/exp_005")
     metrics = evaluate_model_on_loader(
         model=model,
         data_loader=val_loader,
