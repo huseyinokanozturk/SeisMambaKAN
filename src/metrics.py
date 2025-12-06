@@ -70,13 +70,11 @@ def _extract_heads_from_outputs(
     # Detection head
     det_key = find_exact(["detection", "det", "detect", "det_out", "y_det"])
     if det_key is None and keys:
-        # Fallback: first key
         det_key = keys[0]
 
     # P head
     p_key = find_exact(["p", "p_gauss", "p_gaussian", "p_out", "phase_p"])
     if p_key is None:
-        # Heuristic: key containing 'p' but not 's' or 'det'
         for k, lk in lower_map.items():
             if "p" in lk and "s" not in lk and "det" not in lk:
                 p_key = k
@@ -85,7 +83,6 @@ def _extract_heads_from_outputs(
     # S head
     s_key = find_exact(["s", "s_gauss", "s_gaussian", "s_out", "phase_s"])
     if s_key is None:
-        # Heuristic: key containing 's' but not 'p' or 'det'
         for k, lk in lower_map.items():
             if "s" in lk and "p" not in lk and "det" not in lk:
                 s_key = k
@@ -141,7 +138,6 @@ def _extract_label_curves(
     # Detection label key
     det_label_key = find_exact_label(["det", "detection", "y_det", "y_detection", "label_det"])
     if det_label_key is None:
-        # heuristic: any key containing "det"
         for k, lk in lower_map.items():
             if "det" in lk:
                 det_label_key = k
@@ -150,7 +146,6 @@ def _extract_label_curves(
     # P Gaussian label key
     p_label_key = find_exact_label(["p_gauss", "p_target", "p_label", "gauss_p", "p"])
     if p_label_key is None:
-        # heuristic: key containing "p" but not "s" or "det"
         for k, lk in lower_map.items():
             if "p" in lk and "s" not in lk and "det" not in lk:
                 p_label_key = k
@@ -159,7 +154,6 @@ def _extract_label_curves(
     # S Gaussian label key
     s_label_key = find_exact_label(["s_gauss", "s_target", "s_label", "gauss_s", "s"])
     if s_label_key is None:
-        # heuristic: key containing "s" but not "p" or "det"
         for k, lk in lower_map.items():
             if "s" in lk and "p" not in lk and "det" not in lk:
                 s_label_key = k
@@ -187,7 +181,6 @@ def _extract_label_curves(
     p_true = p_true_t.numpy()
     s_true = s_true_t.numpy()
 
-    # Ensure (B, 1, T) layout
     if det_true.ndim == 2:
         det_true = det_true[:, None, :]
     if p_true.ndim == 2:
@@ -195,7 +188,6 @@ def _extract_label_curves(
     if s_true.ndim == 2:
         s_true = s_true[:, None, :]
 
-    # Optional explicit indices
     p_idx_true_tensor = labels.get("p_idx", None)
     s_idx_true_tensor = labels.get("s_idx", None)
 
@@ -216,33 +208,6 @@ def pick_phases(
 ) -> Dict[str, Any]:
     """
     Phase picker for a single trace.
-
-    Parameters
-    ----------
-    det_curve : array-like of shape (T,)
-        Detection probability curve in [0, 1].
-    p_curve : array-like of shape (T,)
-        Predicted P-phase Gaussian curve (continuous values).
-    s_curve : array-like of shape (T,)
-        Predicted S-phase Gaussian curve (continuous values).
-    sample_rate : float
-        Sampling frequency in Hz.
-    picker_cfg : dict
-        Configuration dictionary taken from config["metrics"]["picker"].
-
-    Returns
-    -------
-    result : dict
-        Dictionary with the following fields:
-            has_event_pred : bool
-            det_max        : float
-            p_idx          : Optional[int]
-            s_idx          : Optional[int]
-            p_time         : Optional[float]  # seconds
-            s_time         : Optional[float]  # seconds
-            p_amp          : Optional[float]
-            s_amp          : Optional[float]
-            ps_gap_ok      : Optional[bool]
     """
     det = _to_numpy_1d(det_curve)
     p = _to_numpy_1d(p_curve)
@@ -251,9 +216,6 @@ def pick_phases(
     T = det.shape[0]
     assert p.shape[0] == T and s.shape[0] == T, "All curves must have the same length."
 
-    # -------------------------------------------------------------------------
-    # Configuration
-    # -------------------------------------------------------------------------
     use_detection_window = bool(picker_cfg.get("use_detection_window", True))
     det_window_threshold = float(picker_cfg.get("det_window_threshold", 0.3))
     p_amp_threshold = float(picker_cfg.get("p_amp_threshold", 0.1))
@@ -263,15 +225,9 @@ def pick_phases(
 
     pad_samples = int(round(max_search_pad_sec * sample_rate))
 
-    # -------------------------------------------------------------------------
-    # Trace-level event decision
-    # -------------------------------------------------------------------------
     det_max = float(det.max()) if T > 0 else 0.0
-    has_event_pred = True  # picker itself is agnostic; detection metrics decide
+    has_event_pred = True
 
-    # -------------------------------------------------------------------------
-    # Detection-based search window
-    # -------------------------------------------------------------------------
     if use_detection_window:
         mask = det >= det_window_threshold
         if np.any(mask):
@@ -279,14 +235,10 @@ def pick_phases(
             start = max(int(idx[0]) - pad_samples, 0)
             end = min(int(idx[-1]) + pad_samples, T - 1)
         else:
-            # Fallback: use the entire trace
             start, end = 0, T - 1
     else:
         start, end = 0, T - 1
 
-    # -------------------------------------------------------------------------
-    # P-phase pick
-    # -------------------------------------------------------------------------
     p_idx: Optional[int] = None
     p_time: Optional[float] = None
     p_amp: Optional[float] = None
@@ -302,9 +254,6 @@ def pick_phases(
             p_amp = p_amp_candidate
             p_time = p_idx / sample_rate
 
-    # -------------------------------------------------------------------------
-    # S-phase pick
-    # -------------------------------------------------------------------------
     s_idx: Optional[int] = None
     s_time: Optional[float] = None
     s_amp: Optional[float] = None
@@ -320,9 +269,6 @@ def pick_phases(
             s_amp = s_amp_candidate
             s_time = s_idx / sample_rate
 
-    # -------------------------------------------------------------------------
-    # Optional P–S gap sanity check
-    # -------------------------------------------------------------------------
     ps_gap_ok: Optional[bool] = None
     if p_time is not None and s_time is not None and min_ps_gap_sec > 0.0:
         ps_gap_ok = (s_time - p_time) >= min_ps_gap_sec
@@ -356,7 +302,6 @@ def compute_detection_metrics(
     """
     assert len(y_event_true) == len(y_event_pred), "Mismatched trace-level lengths."
 
-    # Trace-level confusion matrix
     tp = fp = tn = fn = 0
 
     for y_t, y_p in zip(y_event_true, y_event_pred):
@@ -391,7 +336,6 @@ def compute_detection_metrics(
         }
     }
 
-    # Time-step level metrics (optional)
     if y_ts_true is not None and y_ts_pred is not None:
         y_ts_true = np.asarray(y_ts_true).astype(int).reshape(-1)
         y_ts_pred = np.asarray(y_ts_pred).astype(int).reshape(-1)
@@ -425,7 +369,7 @@ def compute_detection_metrics(
 
 
 # =============================================================================
-# Phase metrics (P/S MAE, hit-rates, etc.)
+# Phase metrics
 # =============================================================================
 
 
@@ -508,7 +452,7 @@ def compute_phase_metrics(
 
 
 # =============================================================================
-# Visualization helpers (random + worst-3 examples)
+# Visualization helpers
 # =============================================================================
 
 
@@ -520,6 +464,8 @@ def _plot_single_example(
 ) -> None:
     """
     Plot detection, P and S curves for a single example and save as PNG.
+
+    Additionally, write P/S sample indices and differences in the title.
     """
     det_true = trace["det_true"]
     det_pred = trace["det_pred"]
@@ -533,21 +479,36 @@ def _plot_single_example(
     p_idx_pred = trace["p_idx_pred"]
     s_idx_pred = trace["s_idx_pred"]
 
+    # Build info strings for title
+    if p_idx_pred is not None:
+        p_d_samples = int(p_idx_pred) - int(p_idx_true)
+        p_d_sec = p_d_samples / sample_rate
+        p_info = f"P: gt={p_idx_true}, pred={p_idx_pred}, Δ={p_d_samples} ({p_d_sec:.3f}s)"
+    else:
+        p_info = f"P: gt={p_idx_true}, pred=None"
+
+    if s_idx_pred is not None:
+        s_d_samples = int(s_idx_pred) - int(s_idx_true)
+        s_d_sec = s_d_samples / sample_rate
+        s_info = f"S: gt={s_idx_true}, pred={s_idx_pred}, Δ={s_d_samples} ({s_d_sec:.3f}s)"
+    else:
+        s_info = f"S: gt={s_idx_true}, pred=None"
+
+    full_title = f"{title}\n{p_info} | {s_info}"
+
     T = det_true.shape[0]
     t = np.arange(T) / sample_rate
 
     fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
 
-    # Detection
     ax = axes[0]
     ax.plot(t, det_true, label="Detection (GT)", linewidth=1.0)
     ax.plot(t, det_pred, label="Detection (Pred)", linewidth=1.0, linestyle="--")
     ax.set_ylabel("Det prob")
-    ax.set_title(title)
+    ax.set_title(full_title)
     ax.grid(True, alpha=0.3)
     ax.legend(loc="upper right", fontsize=8)
 
-    # P-phase
     ax = axes[1]
     ax.plot(t, p_true, label="P Gaussian (GT)", linewidth=1.0)
     ax.plot(t, p_pred, label="P Gaussian (Pred)", linewidth=1.0, linestyle="--")
@@ -561,7 +522,6 @@ def _plot_single_example(
     ax.grid(True, alpha=0.3)
     ax.legend(loc="upper right", fontsize=8)
 
-    # S-phase
     ax = axes[2]
     ax.plot(t, s_true, label="S Gaussian (GT)", linewidth=1.0)
     ax.plot(t, s_pred, label="S Gaussian (Pred)", linewidth=1.0, linestyle="--")
@@ -589,17 +549,13 @@ def _save_example_plots(
     split_name: str,
 ) -> None:
     """
-    Save:
-      - one random event example
-      - three worst event examples (by max(P_abs_err, S_abs_err))
-    as PNG files into the metrics directory.
+    Save one random and three worst event traces as PNG figures.
     """
     if not event_traces:
         return
 
     rng = np.random.RandomState(42)
 
-    # Random example
     rand_idx = int(rng.randint(0, len(event_traces)))
     rand_trace = event_traces[rand_idx]
     rand_path = out_dir / f"{split_name}_random_example.png"
@@ -611,7 +567,6 @@ def _save_example_plots(
         title=f"{split_name.upper()} - Random Example (idx={rand_idx})",
     )
 
-    # Worst-3 by error (combined P/S absolute error)
     scores = []
     for tr in event_traces:
         p_err = tr.get("p_abs_err_sec", None)
@@ -621,8 +576,8 @@ def _save_example_plots(
         scores.append(max(p_val, s_val))
 
     scores = np.asarray(scores, dtype=float)
-    order = np.argsort(scores)  # ascending
-    worst_indices = order[-3:]  # last 3 = largest errors
+    order = np.argsort(scores)
+    worst_indices = order[-3:]
 
     for rank, idx in enumerate(reversed(worst_indices), start=1):
         tr = event_traces[int(idx)]
@@ -636,7 +591,7 @@ def _save_example_plots(
 
 
 # =============================================================================
-# High-level evaluation on a DataLoader
+# High-level evaluation
 # =============================================================================
 
 
@@ -650,11 +605,8 @@ def evaluate_model_on_loader(
     exp_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """
-    Evaluate a trained model on a given DataLoader and compute:
-      - trace-level detection metrics
-      - time-step-level detection metrics
-      - P and S phase picking metrics (MAE, MedAE, STD, hit-rates)
-      - diagnostic plots for one random and three worst event examples
+    Evaluate a trained model on a given DataLoader and compute metrics.
+    Also saves diagnostic plots (random + worst-3 event traces).
     """
     metrics_cfg = main_cfg.get("metrics", {})
     sample_rate = float(metrics_cfg.get("sample_rate", 100.0))
@@ -671,7 +623,6 @@ def evaluate_model_on_loader(
     save_per_trace_csv = bool(eval_cfg.get("save_per_trace_csv", False))
     output_subdir = str(eval_cfg.get("output_dir", "metrics"))
 
-    # Output directory inside the experiment folder (if exp_dir is given)
     metrics_out_dir: Optional[Path] = None
     if exp_dir is not None:
         metrics_out_dir = Path(exp_dir) / output_subdir
@@ -680,54 +631,41 @@ def evaluate_model_on_loader(
     model.eval()
     device_type = device.type
 
-    # -------------------------------------------------------------------------
-    # Storage for detection metrics
-    # -------------------------------------------------------------------------
     y_event_true: List[int] = []
     y_event_pred: List[int] = []
 
     y_ts_true_list: List[np.ndarray] = []
     y_ts_pred_list: List[np.ndarray] = []
 
-    # -------------------------------------------------------------------------
-    # Storage for phase metrics
-    # -------------------------------------------------------------------------
     p_gt_indices: List[int] = []
     p_pred_indices: List[Optional[int]] = []
 
     s_gt_indices: List[int] = []
     s_pred_indices: List[Optional[int]] = []
 
-    # Optional per-trace rows for CSV
     per_trace_rows: List[Dict[str, Any]] = []
-
-    # For visualization: store event traces with all curves and errors
     event_traces: List[Dict[str, Any]] = []
 
-    # -------------------------------------------------------------------------
-    # Main evaluation loop
-    # -------------------------------------------------------------------------
     for batch_idx, (x, labels) in enumerate(data_loader):
         if (max_batches is not None) and (batch_idx >= int(max_batches)):
             break
 
         x = x.to(device, non_blocking=True)
 
-        # Model expects (B, C, T)
-        if x.dim() == 3:  # (B, T, C)
-            x = x.permute(0, 2, 1).contiguous()
+        if x.dim() == 3:
+            x_model = x.permute(0, 2, 1).contiguous()
+        else:
+            x_model = x
 
         with torch.amp.autocast(device_type=device_type, enabled=False):
-            outputs = model(x)
+            outputs = model(x_model)
 
-        # Model outputs (robust head extraction)
         det_out, p_out, s_out = _extract_heads_from_outputs(outputs)
 
-        det_pred = det_out.detach().cpu().numpy()  # (B, 1, T) or (B, T)
+        det_pred = det_out.detach().cpu().numpy()
         p_pred = p_out.detach().cpu().numpy()
         s_pred = s_out.detach().cpu().numpy()
 
-        # Ensure shape is (B, 1, T)
         if det_pred.ndim == 2:
             det_pred = det_pred[:, None, :]
         if p_pred.ndim == 2:
@@ -735,7 +673,6 @@ def evaluate_model_on_loader(
         if s_pred.ndim == 2:
             s_pred = s_pred[:, None, :]
 
-        # Labels (robust extraction)
         det_true, p_gauss_true, s_gauss_true, p_idx_true_tensor, s_idx_true_tensor = (
             _extract_label_curves(labels)
         )
@@ -743,33 +680,29 @@ def evaluate_model_on_loader(
         B = det_true.shape[0]
 
         for i in range(B):
-            det_true_i = det_true[i, 0]   # (T,)
-            det_pred_i = det_pred[i, 0]   # (T,)
+            det_true_i = det_true[i, 0]
+            det_pred_i = det_pred[i, 0]
             p_pred_i = p_pred[i, 0]
             s_pred_i = s_pred[i, 0]
             p_gauss_true_i = p_gauss_true[i, 0]
             s_gauss_true_i = s_gauss_true[i, 0]
 
-            # Ground-truth event / noise per trace
             gt_event_flag = int(
                 (det_true_i.max() >= 0.5)
                 or (p_gauss_true_i.max() > 0.0)
                 or (s_gauss_true_i.max() > 0.0)
             )
 
-            # Predicted event / noise per trace
             pred_event_flag = int(det_pred_i.max() >= trace_threshold)
 
             y_event_true.append(gt_event_flag)
             y_event_pred.append(pred_event_flag)
 
-            # Time-step level detection labels
             y_ts_true = (det_true_i >= 0.5).astype(int)
             y_ts_pred = (det_pred_i >= timestep_threshold).astype(int)
             y_ts_true_list.append(y_ts_true)
             y_ts_pred_list.append(y_ts_pred)
 
-            # Ground-truth phase indices
             if p_idx_true_tensor is not None:
                 p_idx_true = int(p_idx_true_tensor[i].item())
             else:
@@ -780,12 +713,10 @@ def evaluate_model_on_loader(
             else:
                 s_idx_true = int(np.argmax(s_gauss_true_i))
 
-            # Only consider event traces for phase metrics and plots
             if gt_event_flag == 1:
                 p_gt_indices.append(p_idx_true)
                 s_gt_indices.append(s_idx_true)
 
-            # Phase picking on predicted curves
             pick_result = pick_phases(
                 det_curve=det_pred_i,
                 p_curve=p_pred_i,
@@ -801,7 +732,6 @@ def evaluate_model_on_loader(
                 p_pred_indices.append(p_idx_pred)
                 s_pred_indices.append(s_idx_pred)
 
-                # Compute errors for visualization ranking
                 p_err_sec = None
                 p_abs_err_sec = None
                 if p_idx_pred is not None:
@@ -835,7 +765,6 @@ def evaluate_model_on_loader(
                     }
                 )
 
-            # Optional per-trace CSV row
             if save_per_trace_csv:
                 row = {
                     "split": split_name,
@@ -851,9 +780,6 @@ def evaluate_model_on_loader(
                 }
                 per_trace_rows.append(row)
 
-    # -------------------------------------------------------------------------
-    # Aggregate detection metrics
-    # -------------------------------------------------------------------------
     y_ts_true_flat = np.concatenate(y_ts_true_list, axis=0) if y_ts_true_list else None
     y_ts_pred_flat = np.concatenate(y_ts_pred_list, axis=0) if y_ts_pred_list else None
 
@@ -864,9 +790,6 @@ def evaluate_model_on_loader(
         y_ts_pred=y_ts_pred_flat,
     )
 
-    # -------------------------------------------------------------------------
-    # Aggregate phase metrics (P and S)
-    # -------------------------------------------------------------------------
     p_metrics = compute_phase_metrics(
         phase_name="p",
         gt_indices=p_gt_indices,
@@ -883,9 +806,6 @@ def evaluate_model_on_loader(
         tolerance_cfg=phase_tol_cfg,
     )
 
-    # -------------------------------------------------------------------------
-    # Final metrics dictionary
-    # -------------------------------------------------------------------------
     metrics: Dict[str, Any] = {
         "split": split_name,
         "detection": det_metrics,
@@ -898,9 +818,6 @@ def evaluate_model_on_loader(
         },
     }
 
-    # -------------------------------------------------------------------------
-    # Save outputs (JSON + CSV + PNG figures) if requested
-    # -------------------------------------------------------------------------
     if metrics_out_dir is not None:
         if save_json:
             json_path = metrics_out_dir / f"{split_name}_metrics.json"
@@ -916,7 +833,6 @@ def evaluate_model_on_loader(
                 for row in per_trace_rows:
                     writer.writerow(row)
 
-        # Diagnostic plots
         _save_example_plots(
             event_traces=event_traces,
             sample_rate=sample_rate,
