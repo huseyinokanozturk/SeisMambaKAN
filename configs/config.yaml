@@ -178,7 +178,7 @@ training:
 
 dataloader:
   # Number of worker processes for PyTorch DataLoader.
-  num_workers: 1
+  num_workers: 8
 
   # Whether to pin memory to speed up host-to-device transfers.
   pin_memory: true
