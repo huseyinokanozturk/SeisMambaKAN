@@ -183,9 +183,18 @@ class Trainer:
         self.best_val_loss: float = float("inf")
 
         # Step/epoch counters for ETA logging
-        self.steps_per_epoch: int = len(self.train_loader)
         self.total_epochs: int = int(self.train_cfg.get("epochs", 1))
-        self.total_steps: int = self.steps_per_epoch * self.total_epochs
+
+        # WebDataset (IterableDataset) için len() olmayabileceği için try/except
+        try:
+            self.steps_per_epoch: int | None = len(self.train_loader)
+        except TypeError:
+            self.steps_per_epoch = None
+
+        if self.steps_per_epoch is not None:
+            self.total_steps: int | None = self.steps_per_epoch * self.total_epochs
+        else:
+            self.total_steps = None
 
     # ------------------------------------------------------------------
     # Core utilities
@@ -437,7 +446,7 @@ class Trainer:
     # ------------------------------------------------------------------
 
     def fit(self) -> None:
-        num_epochs = int(self.train_cfg.get("epochs", 1))
+        num_epochs = self.total_epochs
 
         self._log(f"Starting training for {num_epochs} epochs.")
         self._log(f"Experiment directory: {self.exp_dir}")
@@ -445,9 +454,17 @@ class Trainer:
             self._log(f"Mirror experiment directory: {self.mirror_exp_dir}")
         self._log(f"Device: {self.device.type}, AMP: {self.use_amp}")
         self._log(f"use_channels_last (4D only): {self.channels_last}")
-        self._log(
-            f"Steps per epoch: {self.steps_per_epoch}, total steps: {self.total_steps}"
-        )
+
+        if self.steps_per_epoch is not None:
+            self._log(
+                f"Steps per epoch: {self.steps_per_epoch}, "
+                f"total steps: {self.total_steps}"
+            )
+        else:
+            self._log(
+                "Steps per epoch: unknown (IterableDataset), "
+                "ETA based on average epoch time only."
+            )
 
         # Global timer for ETA estimation
         start_time = time.time()
