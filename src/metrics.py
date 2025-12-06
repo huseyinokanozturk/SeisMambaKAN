@@ -35,6 +35,71 @@ def _format_float(x: float) -> float:
     return float(x)
 
 
+def _extract_heads_from_outputs(
+    outputs: Any,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Extract detection, P, and S heads from model outputs.
+
+    This helper makes metrics robust to different naming conventions
+    used in the network (e.g., "detection"/"det", "p"/"p_gauss", "s"/"s_gauss").
+    """
+    if not isinstance(outputs, dict):
+        raise TypeError(
+            f"Expected model outputs to be a dict, got {type(outputs)} instead. "
+            "metrics.evaluate_model_on_loader currently supports only dict outputs."
+        )
+
+    keys = list(outputs.keys())
+    lower_map = {k: k.lower() for k in keys}
+
+    def find_exact(candidates: List[str]) -> Optional[str]:
+        for cand in candidates:
+            if cand in outputs:
+                return cand
+        return None
+
+    # Detection head
+    det_key = find_exact(["detection", "det", "detect", "det_out", "y_det"])
+    if det_key is None and keys:
+        # Fallback: first key
+        det_key = keys[0]
+
+    # P head
+    p_key = find_exact(["p", "p_gauss", "p_gaussian", "p_out", "phase_p"])
+    if p_key is None:
+        # Heuristic: key containing 'p' but not 's' or 'det'
+        for k, lk in lower_map.items():
+            if "p" in lk and "s" not in lk and "det" not in lk:
+                p_key = k
+                break
+
+    # S head
+    s_key = find_exact(["s", "s_gauss", "s_gaussian", "s_out", "phase_s"])
+    if s_key is None:
+        # Heuristic: key containing 's' but not 'p' or 'det'
+        for k, lk in lower_map.items():
+            if "s" in lk and "p" not in lk and "det" not in lk:
+                s_key = k
+                break
+
+    missing = []
+    if det_key is None:
+        missing.append("detection")
+    if p_key is None:
+        missing.append("p")
+    if s_key is None:
+        missing.append("s")
+
+    if missing:
+        raise KeyError(
+            f"Could not infer head(s) {missing} from model outputs. "
+            f"Available keys: {list(outputs.keys())}"
+        )
+
+    return outputs[det_key], outputs[p_key], outputs[s_key]
+
+
 # =============================================================================
 # Phase picker
 # =============================================================================
@@ -499,11 +564,20 @@ def evaluate_model_on_loader(
         with torch.amp.autocast(device_type=device_type, enabled=False):
             outputs = model(x)
 
-        # Extract detection and phase outputs
-        # Expected keys in outputs: "detection", "p", "s"
-        det_pred = outputs["detection"].detach().cpu().numpy()  # (B, 1, T)
-        p_pred = outputs["p"].detach().cpu().numpy()            # (B, 1, T)
-        s_pred = outputs["s"].detach().cpu().numpy()            # (B, 1, T)
+        # Extract detection and phase outputs (robust to different key names)
+        det_out, p_out, s_out = _extract_heads_from_outputs(outputs)
+
+        det_pred = det_out.detach().cpu().numpy()  # (B, 1, T) or (B, T)
+        p_pred = p_out.detach().cpu().numpy()
+        s_pred = s_out.detach().cpu().numpy()
+
+        # Ensure shape is (B, 1, T)
+        if det_pred.ndim == 2:
+            det_pred = det_pred[:, None, :]
+        if p_pred.ndim == 2:
+            p_pred = p_pred[:, None, :]
+        if s_pred.ndim == 2:
+            s_pred = s_pred[:, None, :]
 
         det_true = labels["det"].detach().cpu().numpy()         # (B, 1, T)
         p_gauss_true = labels["p_gauss"].detach().cpu().numpy() # (B, 1, T)
