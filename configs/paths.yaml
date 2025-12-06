@@ -65,3 +65,4 @@ webdataset:
 experiments:
   # Root directory under project folder where experiments will live
   root_dir: "experiments"
+  drive_root_dir: "/content/drive/MyDrive/Proje_SeisMamba/SeisMambaKAN/experiments"
