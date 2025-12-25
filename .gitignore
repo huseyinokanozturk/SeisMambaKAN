@@ -243,7 +243,6 @@ Thumbs.db
 # VSCode
 .vscode/
 
-# PyTorch Lightning / WandB / TensorBoard logs (ileride kullanırsan)
-lightning_logs/
+# PyTorch Lightning / WandB / TensorBoard logs 
 wandb/
 runs/
