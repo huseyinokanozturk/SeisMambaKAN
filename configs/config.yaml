@@ -168,17 +168,17 @@ training:
   seed: 42
 
   # Base batch size for training.
-  batch_size: 128
+  batch_size: 256
 
   # Total number of training epochs (used later in the trainer).
-  epochs: 50
+  epochs: 20
 
   # Initial learning rate (optimizer configuration will use this).
-  learning_rate: 3.0e-4
+  learning_rate: 5.0e-4
 
 dataloader:
   # Number of worker processes for PyTorch DataLoader.
-  num_workers: 8
+  num_workers: 12
 
   # Whether to pin memory to speed up host-to-device transfers.
   pin_memory: true
@@ -187,7 +187,7 @@ dataloader:
   persistent_workers: true
 
   # Number of batches prefetched by each worker.
-  prefetch_factor: 2
+  prefetch_factor: 4
 
   # Whether to drop the last (possibly incomplete) batch during training.
   drop_last: true
@@ -247,7 +247,7 @@ loss:
   # --------------------------------------------------------------------------
   center_loss:
     enabled: true         # keep off in first experiments
-    weight: 0.0            # lambda_center; non-zero only if enabled = true
+    weight: 0.05            # lambda_center; non-zero only if enabled = true
     temperature: 10.0      # controls sharpness of soft-argmax over time axis
 
 metrics:
