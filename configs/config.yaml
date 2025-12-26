@@ -221,7 +221,7 @@ loss:
   # --------------------------------------------------------------------------
   detection:
     loss_type: "bce"        # ["bce", "focal_bce"] – plain BCE
-    positive_weight: 5.0    # weight for y=1 samples to handle imbalance
+    positive_weight: 1.0    # weight for y=1 samples to handle imbalance
     use_focal: false        # if true, use focal variant instead of plain BCE
     focal_alpha: 0.25       # only used when use_focal = true
     focal_gamma: 2.0        # focusing parameter for focal loss
@@ -263,11 +263,11 @@ metrics:
   detection:
     # Threshold for deciding whether a trace contains an earthquake event.
     # If max(det_prob) >= trace_threshold → event is detected.
-    trace_threshold: 0.5
+    trace_threshold: 0.8
 
     # Threshold used for per-sample (time-step) binary classification
     # when computing frame-level precision/recall/F1.
-    timestep_threshold: 0.5
+    timestep_threshold: 0.7
 
   # ============================================================================
   # Phase Picker Settings (P/S Estimation)
