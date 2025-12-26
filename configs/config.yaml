@@ -76,7 +76,7 @@ labels:
     type: "gaussian"
 
     # Standard deviation of the Gaussian (in samples) used for detection target.
-    sigma_samples: 10.0
+    sigma_samples: 8.0
 
     # Peak value of the Gaussian target.
     peak_value: 1.0
@@ -88,9 +88,9 @@ labels:
   # Phase picking heads for P and S phases.
   phase:
     # P-phase Gaussian label parameters.
-    p_sigma_samples: 10.0
+    p_sigma_samples: 8.0
     # S-phase Gaussian label parameters.
-    s_sigma_samples: 10.0
+    s_sigma_samples: 8.0
 
     # Peak value for both P and S Gaussian labels.
     peak_value: 1.0
@@ -246,7 +246,7 @@ loss:
   # Optional center-based loss (soft-argmax on P/S), disabled for now
   # --------------------------------------------------------------------------
   center_loss:
-    enabled: false         # keep off in first experiments
+    enabled: true         # keep off in first experiments
     weight: 0.0            # lambda_center; non-zero only if enabled = true
     temperature: 10.0      # controls sharpness of soft-argmax over time axis
 
@@ -279,12 +279,12 @@ metrics:
 
     # Minimum detection probability for a time sample to be included in the
     # detection-based search window.
-    det_window_threshold: 0.3
+    det_window_threshold: 0.6
 
     # Minimum required Gaussian amplitude for accepting a predicted P or S pick.
     # If the maximum Gaussian value is below this threshold, the phase is rejected.
-    p_amp_threshold: 0.1
-    s_amp_threshold: 0.1
+    p_amp_threshold: 0.25
+    s_amp_threshold: 0.20
 
     # Optional constraints for stabilizing phase picking.
     # Minimum allowed P–S time separation in seconds.
@@ -292,7 +292,7 @@ metrics:
 
     # Additional padding (in seconds) around the detection window to expand
     # the candidate search region for P/S phases.
-    max_search_pad_sec: 0.5
+    max_search_pad_sec: 0.2
 
   # ============================================================================
   # Phase Pick Error Tolerances (Used for Reporting Accuracy)
