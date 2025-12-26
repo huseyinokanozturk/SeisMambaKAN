@@ -8,7 +8,7 @@ model:
   dropout: 0.10
   use_channels_last: false    # Optional: used by training loop for memory optimization
   # Optional mixed precision flag (can be used in training script)
-  use_amp: true
+  use_amp: false
 
 # ============================================================
 # ENCODER: 1D U-Net + Mamba Architecture
