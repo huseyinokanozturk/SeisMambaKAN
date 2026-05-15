@@ -84,9 +84,20 @@ def prepare_repo(colab_project: str, git_repo_url: str) -> None:
     if colab_path.exists() and (colab_path / ".git").exists():
         print(f"[INFO] Pulling latest in {colab_project}")
         os.chdir(colab_project)
-        _run("git stash --include-untracked --quiet", "git stash")
-        _run("git pull --rebase", "git pull --rebase")
-        _run("git stash pop --quiet", "git stash pop (may noop)")
+
+        # Only stash if there are local modifications; otherwise skip both
+        # stash and pop entirely (avoids the cosmetic "No stash entries" warning).
+        dirty = subprocess.run(
+            "git diff --quiet && git diff --cached --quiet",
+            shell=True,
+        ).returncode != 0
+
+        if dirty:
+            _run("git stash --include-untracked --quiet", "git stash (local changes)")
+            _run("git pull --rebase", "git pull --rebase")
+            _run("git stash pop --quiet", "git stash pop")
+        else:
+            _run("git pull --rebase", "git pull --rebase")
     else:
         if colab_path.exists():
             print(f"[INFO] Removing non-git folder at {colab_project}")
@@ -201,21 +212,107 @@ def ensure_torch(target_version: str) -> None:
     _run(cmd, "Installing torch/vision/audio (cu121)")
 
 
+def _detect_torch_combo() -> tuple[str, str, str]:
+    """
+    Inspect the *currently installed* torch and return (py_tag, torch_mm, cuda_major).
+
+    Examples:
+        py_tag    -> "cp312"
+        torch_mm  -> "2.5"       (major.minor only)
+        cuda_major-> "12"        (CUDA major)
+
+    Raises if torch is missing or is a CPU-only build (no CUDA).
+    """
+    import torch  # type: ignore
+    py_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+
+    base_ver = torch.__version__.split("+")[0]
+    parts = base_ver.split(".")
+    torch_mm = f"{parts[0]}.{parts[1]}"
+
+    cuda_full = (torch.version.cuda or "").strip()
+    if not cuda_full:
+        raise RuntimeError(
+            f"torch={torch.__version__} is CPU-only; cannot install CUDA-backed "
+            "mamba/causal_conv1d wheels. Switch runtime to GPU and re-run setup."
+        )
+    cuda_major = cuda_full.split(".")[0]
+    return py_tag, torch_mm, cuda_major
+
+
+def install_mamba_official_wheels(
+    mamba_version: str,
+    causal_version: str,
+    cxx11_abi: str = "FALSE",
+) -> bool:
+    """
+    Install mamba_ssm + causal_conv1d from upstream GitHub release wheels,
+    auto-matched to the installed torch (major.minor) + python tag + CUDA major.
+
+    Returns True on success.
+    """
+    py_tag, torch_mm, cu_major = _detect_torch_combo()
+
+    causal_url = (
+        f"https://github.com/Dao-AILab/causal-conv1d/releases/download/"
+        f"v{causal_version}/causal_conv1d-{causal_version}"
+        f"+cu{cu_major}torch{torch_mm}cxx11abi{cxx11_abi}"
+        f"-{py_tag}-{py_tag}-linux_x86_64.whl"
+    )
+    mamba_url = (
+        f"https://github.com/state-spaces/mamba/releases/download/"
+        f"v{mamba_version}/mamba_ssm-{mamba_version}"
+        f"+cu{cu_major}torch{torch_mm}cxx11abi{cxx11_abi}"
+        f"-{py_tag}-{py_tag}-linux_x86_64.whl"
+    )
+
+    print(f"[INFO] causal_conv1d: {causal_url}")
+    print(f"[INFO] mamba_ssm:    {mamba_url}")
+
+    ok_c = _run(
+        f'pip install -q --no-build-isolation "{causal_url}"',
+        f"Installing causal_conv1d {causal_version} (torch{torch_mm} cu{cu_major} {py_tag})",
+    )
+    if not ok_c:
+        print("[FAIL] causal_conv1d wheel install failed (URL likely unavailable for this combo).")
+        return False
+
+    ok_m = _run(
+        f'pip install -q --no-build-isolation "{mamba_url}"',
+        f"Installing mamba_ssm {mamba_version} (torch{torch_mm} cu{cu_major} {py_tag})",
+    )
+    if not ok_m:
+        print("[FAIL] mamba_ssm wheel install failed.")
+        return False
+
+    print("[OK] Mamba + causal_conv1d installed from upstream release wheels.")
+    return True
+
+
 def install_mamba_from_wheels(
     wheels_dir: str,
     mamba_wheel: str,
     causal_wheel: str,
-) -> None:
-    """Install mamba_ssm + causal_conv1d from wheels stored on Drive."""
+) -> bool:
+    """
+    LEGACY: install mamba_ssm + causal_conv1d from wheels stored on Drive.
+    Kept as an offline fallback. Returns True on success.
+
+    Prefer install_mamba_official_wheels() — it auto-matches the current torch
+    instead of relying on manually-curated Drive wheels.
+    """
     wheels = Path(wheels_dir)
     m = wheels / mamba_wheel
     c = wheels / causal_wheel
     if not (m.exists() and c.exists()):
-        print(f"[WARN] Mamba wheels not found in {wheels}; skipping.")
+        print(f"[WARN] Drive wheels not found in {wheels}; skipping.")
         print(f"       expected: {mamba_wheel} and {causal_wheel}")
-        return
-    _run(f'pip install -q "{c}" "{m}"', "Installing mamba_ssm + causal_conv1d from wheels")
-    print("[OK] Mamba + causal_conv1d installed from wheels.")
+        return False
+    ok = _run(f'pip install -q "{c}" "{m}"',
+              "Installing mamba_ssm + causal_conv1d from Drive wheels")
+    if ok:
+        print("[OK] Mamba + causal_conv1d installed from Drive wheels.")
+    return ok
 
 
 def install_requirements(colab_project: str) -> None:
@@ -304,12 +401,15 @@ def run_full_setup(
         "/content/drive/MyDrive/Proje_SeisMamba/SeisMambaKAN/wheels",
     )
     target_torch = colab_cfg.get("target_torch_version", "2.5.1+cu121")
-    mamba_wheel = colab_cfg.get(
-        "mamba_wheel_name", "mamba_ssm-2.2.6.post3-cp312-cp312-linux_x86_64.whl"
-    )
-    causal_wheel = colab_cfg.get(
-        "causal_wheel_name", "causal_conv1d-1.5.3.post1-cp312-cp312-linux_x86_64.whl"
-    )
+
+    # Upstream wheel versions (auto-matched to torch + python at install time).
+    mamba_version = str(colab_cfg.get("mamba_version", "2.2.6.post3"))
+    causal_version = str(colab_cfg.get("causal_version", "1.5.3.post1"))
+    cxx11_abi = str(colab_cfg.get("wheel_cxx11_abi", "FALSE")).upper()
+
+    # Legacy: Drive wheel filenames, kept as offline fallback.
+    legacy_mamba_wheel = colab_cfg.get("mamba_wheel_name")
+    legacy_causal_wheel = colab_cfg.get("causal_wheel_name")
 
     # ----- 2) Data ---------------------------------------------------------
     print("\n[3/6] Data sync")
@@ -326,8 +426,27 @@ def run_full_setup(
     print("\n[5/6] Packages")
     if not skip_torch:
         ensure_torch(target_torch)
+
     if not skip_wheels:
-        install_mamba_from_wheels(wheels_dir, mamba_wheel, causal_wheel)
+        # Strategy:
+        #   1) Try official GitHub release wheels matched to the installed
+        #      torch + python + CUDA. This is the supported path.
+        #   2) If that fails (offline, etc.) and legacy Drive wheels are
+        #      configured, fall back to those.
+        wheels_ok = False
+        try:
+            wheels_ok = install_mamba_official_wheels(
+                mamba_version=mamba_version,
+                causal_version=causal_version,
+                cxx11_abi=cxx11_abi,
+            )
+        except RuntimeError as e:
+            print(f"[WARN] official-wheel install pre-check failed: {e}")
+
+        if not wheels_ok and legacy_mamba_wheel and legacy_causal_wheel:
+            print("[INFO] Falling back to Drive wheels (legacy mode).")
+            install_mamba_from_wheels(wheels_dir, legacy_mamba_wheel, legacy_causal_wheel)
+
     if not skip_requirements:
         install_requirements(colab_project)
 

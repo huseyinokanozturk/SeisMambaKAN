@@ -80,7 +80,23 @@ drive:
 colab:
   project_root: "/content/SeisMambaKAN"
   git_repo_url: "https://github.com/huseyinokanozturk/SeisMambaKAN.git"
-  # Torch wheel target (must match wheels stored under drive.wheels_dir)
+
+  # Torch we install on Colab. The mamba/causal_conv1d release wheels for
+  # this exact (cuda, torch major.minor, python tag) tuple must exist on
+  # GitHub. If you bump this, also bump mamba_version / causal_version
+  # below to a release that publishes a matching wheel.
   target_torch_version: "2.5.1+cu121"
-  mamba_wheel_name:  "mamba_ssm-2.2.6.post3-cp312-cp312-linux_x86_64.whl"
-  causal_wheel_name: "causal_conv1d-1.5.3.post1-cp312-cp312-linux_x86_64.whl"
+
+  # Upstream package versions. Wheel URL is built as:
+  #   https://github.com/state-spaces/mamba/releases/download/v{mamba_version}/
+  #     mamba_ssm-{mamba_version}+cu{CUDA}torch{T.MM}cxx11abi{ABI}-{cpXY}-{cpXY}-linux_x86_64.whl
+  # (same pattern for Dao-AILab/causal-conv1d)
+  mamba_version:    "2.2.6.post3"
+  causal_version:   "1.5.3.post1"
+  wheel_cxx11_abi:  "FALSE"   # PyTorch default builds use cxx11abiFALSE
+
+  # OPTIONAL legacy fallback: filenames of locally-staged wheels under
+  # drive.wheels_dir. Used only if the GitHub release download fails
+  # (e.g. offline). Leave both unset/null to disable the fallback.
+  mamba_wheel_name:  null
+  causal_wheel_name: null

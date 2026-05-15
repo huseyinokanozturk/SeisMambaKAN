@@ -51,23 +51,21 @@ Create this folder structure on Drive, populated by you once:
 ```
 MyDrive/Proje_SeisMamba/SeisMambaKAN/
 ├── data/processed/all/{train,val,test}/*.tar
-├── data/processed/sample/{train,val,test}/*.tar
-└── wheels/
-    ├── mamba_ssm-2.2.6.post3-cp312-cp312-linux_x86_64.whl
-    └── causal_conv1d-1.5.3.post1-cp312-cp312-linux_x86_64.whl
+└── data/processed/sample/{train,val,test}/*.tar
 ```
 
 `experiments/` and `results/` will be created automatically by the
 training/eval flows.
 
-Wheels can be (re-)downloaded with:
-```bash
-pip download mamba-ssm==2.2.6.post3 causal-conv1d==1.5.3.post1 \
-  --no-deps --dest /content/drive/MyDrive/Proje_SeisMamba/SeisMambaKAN/wheels \
-  --python-version 3.12 --platform manylinux2014_x86_64 --only-binary=:all:
-```
-Verify the cp312-cp312 wheel matches the Colab Python version. If Colab
-moves to Python 3.13, rebuild/redownload.
+**No `wheels/` directory needed.** Mamba + causal_conv1d are downloaded
+at setup time from the official GitHub releases, matched to the current
+torch / python / CUDA tuple. The versions are pinned in
+`configs/paths.yaml -> colab.{mamba_version,causal_version}`.
+
+If you ever need to operate offline, set
+`colab.mamba_wheel_name` + `colab.causal_wheel_name` to local filenames
+under `drive.wheels_dir`; setup will fall back to those if the GitHub
+download fails.
 
 ---
 
@@ -241,12 +239,31 @@ You have not trained yet, or the experiments dir is empty. Either run
 fetch one from Drive.
 
 ### `mamba_ssm` import fails on Colab
-1. Confirm the Colab Python is 3.12 (`!python -V`). Wheels are
-   cp312-cp312; a 3.13 runtime will not find them.
-2. Confirm `drive.wheels_dir` (Drive) contains the two wheels named in
-   `configs/paths.yaml -> colab`.
-3. Re-run `python run.py setup --skip-data --skip-requirements` to
-   reinstall just torch + wheels.
+Most common causes:
+
+1. **No GPU runtime.** Symptom: `libcudart.so.12: cannot open shared object`.
+   Fix: switch the Colab runtime to GPU (T4 / L4 / A100) and re-run setup.
+   Verify with `!python -c "import torch; print(torch.cuda.is_available())"`.
+
+2. **ABI mismatch.** Symptom: `undefined symbol: _ZN3c104cuda29c10_cuda_check_implementation...`.
+   This means the installed mamba wheel was built against a different torch
+   minor version than the one currently installed. Fix:
+   - Confirm `torch.__version__` major.minor matches the value baked into
+     `paths.yaml -> colab.target_torch_version`.
+   - Confirm `colab.mamba_version` / `colab.causal_version` point at
+     releases that publish a wheel for that torch + python + CUDA combo.
+   - List available wheels:
+     ```bash
+     curl -s https://api.github.com/repos/state-spaces/mamba/releases/tags/v2.2.6.post3 \
+       | grep browser_download_url | grep cu12torch2.5 | grep cp312
+     ```
+   - Re-run `python run.py setup --skip-data --skip-requirements` to redo
+     just torch + the upstream wheel install.
+
+3. **Python version mismatch.** Symptom: wheel download 404. The wheels
+   are tagged `cp312-cp312`; if Colab moves to 3.13, list the available
+   tags via the GitHub API and either update `paths.yaml` or wait for
+   upstream to publish a 3.13 wheel.
 
 ### CUDA OOM during training
 - Lower batch size: `python run.py train --batch-size 128`.

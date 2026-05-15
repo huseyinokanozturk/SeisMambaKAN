@@ -101,9 +101,20 @@ configs, and small assets. `.gitignore` enforces this; do not weaken it.
   inside `run.py`, prefer the `_ok`, `_warn`, `_err`, `_bullet` helpers.
 
 ### 3.8 Dependencies
-- Mamba + causal_conv1d are installed from **prebuilt wheels** under
-  `drive.wheels_dir`. Do not move to `pip install mamba-ssm` (the build
-  pipeline on Colab takes too long).
+- Mamba + causal_conv1d are installed from **upstream GitHub release
+  wheels**, auto-matched to the currently installed torch + python +
+  CUDA. The URL is constructed at setup time by
+  `colab_setup.py:install_mamba_official_wheels` from
+  `paths.yaml -> colab.{mamba_version,causal_version,wheel_cxx11_abi}`.
+  Do NOT replace this with plain `pip install mamba-ssm`; that builds
+  from source on Colab and takes 15-30 min, often failing.
+- `paths.yaml -> colab.{mamba_wheel_name,causal_wheel_name}` (legacy
+  Drive-wheel fallback) is optional. Leave it as `null` unless you have
+  to operate offline.
+- If you bump `target_torch_version`, also bump `mamba_version` /
+  `causal_version` to a release that publishes a wheel for the new
+  torch major.minor. Check the available wheels with:
+  `curl -s https://api.github.com/repos/state-spaces/mamba/releases/tags/v<VER>`
 - Adding a new dependency: append to `requirements.txt`, and verify on
   Colab end-to-end before merging.
 
