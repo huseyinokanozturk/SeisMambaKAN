@@ -318,12 +318,29 @@ class SeismicAugmenter:
         """
         Add Gaussian white noise to the waveform with a given probability.
         Noise is scaled relative to the normalized signal.
+
+        Accepts either:
+          - `std_range: [a, b]`  (new, Phase 2.2): per-sample uniform random std
+          - `std: X`             (legacy): a single fixed std
+        If both are present, `std_range` wins.
         """
         cfg = self.cfg_noise
         prob = float(cfg.get("prob", 0.0))
-        std = float(cfg.get("std", 0.0))
 
-        if std <= 0.0 or torch.rand(1).item() >= prob:
+        if torch.rand(1).item() >= prob:
+            return x
+
+        std_range = cfg.get("std_range")
+        if std_range is not None and len(std_range) == 2:
+            a, b = float(std_range[0]), float(std_range[1])
+            if b <= a:
+                std = a
+            else:
+                std = torch.empty(1).uniform_(a, b).item()
+        else:
+            std = float(cfg.get("std", 0.0))
+
+        if std <= 0.0:
             return x
 
         noise = torch.randn_like(x) * std
