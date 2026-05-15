@@ -244,14 +244,25 @@ def install_mamba_official_wheels(
     mamba_version: str,
     causal_version: str,
     cxx11_abi: str = "FALSE",
+    transformers_spec: str = "transformers<4.45",
 ) -> bool:
     """
     Install mamba_ssm + causal_conv1d from upstream GitHub release wheels,
     auto-matched to the installed torch (major.minor) + python tag + CUDA major.
 
+    Also pins `transformers` to a version compatible with mamba_ssm 2.2.x
+    (newer transformers removed `GreedySearchDecoderOnlyOutput`, which
+    mamba_ssm.utils.generation imports at module load time).
+
     Returns True on success.
     """
     py_tag, torch_mm, cu_major = _detect_torch_combo()
+
+    # Pin transformers FIRST so mamba_ssm's runtime import succeeds.
+    _run(
+        f'pip install -q "{transformers_spec}"',
+        f"Pinning {transformers_spec} (mamba_ssm runtime requirement)",
+    )
 
     causal_url = (
         f"https://github.com/Dao-AILab/causal-conv1d/releases/download/"
