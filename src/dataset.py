@@ -685,7 +685,11 @@ def build_dataloader(
     pin_memory = bool(dl_cfg.get("pin_memory", True))
     persistent_workers = bool(dl_cfg.get("persistent_workers", True))
     prefetch_factor = int(dl_cfg.get("prefetch_factor", 2))
-    drop_last = bool(dl_cfg.get("drop_last", is_train))
+    # drop_last is meaningful only for training (stabilizes batch shapes /
+    # BatchNorm stats). For val/test/infer it silently throws away the tail
+    # of small datasets and can yield ZERO batches when batch_size > n_val,
+    # which produces all-zero metrics or StopIteration. Always False off-train.
+    drop_last = bool(dl_cfg.get("drop_last", True)) if is_train else False
 
     # WebDataset distributes shards across workers, one shard per worker on
     # startup. If num_workers > n_shards, some workers receive zero shards
