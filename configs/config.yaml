@@ -194,6 +194,16 @@ training:
   # NaN/Inf guard: skip step on non-finite loss; abort after N consecutive.
   nan_threshold: 10
 
+  # --- Early stopping (Phase 2.5) ---
+  # Stop training when the monitored validation metric does not improve for
+  # `patience` consecutive epochs. `min_delta` is the smallest improvement
+  # that resets the patience counter. `monitor` keys: total | detection | p | s.
+  early_stopping:
+    enabled: true
+    patience: 12
+    min_delta: 1.0e-4
+    monitor: "total"
+
 dataloader:
   # Number of worker processes for PyTorch DataLoader.
   num_workers: 12

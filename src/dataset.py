@@ -267,7 +267,33 @@ class SeismicAugmenter:
         if max_shift <= 0 or torch.rand(1).item() >= prob:
             return x, p_index, s_index
 
-        shift = int(torch.randint(-max_shift, max_shift + 1, (1,)).item())
+        # ------------------------------------------------------------------
+        # Smart per-sample shift range (Phase 2.5)
+        #
+        # For EVENT samples (both P and S in window): clamp the shift range
+        # so that the new P stays >= 0 and the new S stays <= T-1. This
+        # guarantees the event remains in-window after augmentation.
+        # Effect: P/S are seen at all positions in the window, no event is
+        # silently turned into a synthetic-noise sample.
+        #
+        # For NOISE samples (no valid P/S): use the full configured shift
+        # range; nothing to preserve.
+        #
+        # Without this clamp, an aggressive max_shift (e.g. 3000 on a
+        # 6000-sample window) pushes a large fraction of events off-window,
+        # which hurts detection recall (verified in the Phase 2 smoke run).
+        # ------------------------------------------------------------------
+        is_event = (p_index is not None) and (s_index is not None)
+        if is_event:
+            lo = max(-max_shift, -int(p_index))               # type: ignore[arg-type]
+            hi = min( max_shift, (T - 1) - int(s_index))      # type: ignore[arg-type]
+            if lo >= hi:
+                # Event already spans almost the entire window — no room to shift.
+                return x, p_index, s_index
+            shift = int(torch.randint(lo, hi + 1, (1,)).item())
+        else:
+            shift = int(torch.randint(-max_shift, max_shift + 1, (1,)).item())
+
         if shift == 0:
             return x, p_index, s_index
 

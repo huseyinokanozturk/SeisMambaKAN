@@ -259,6 +259,15 @@ class Trainer:
         self.consecutive_nan_count: int = 0
         self.global_step: int = 0
 
+        # --- Early stopping (Phase 2.5) ---
+        es_cfg = self.train_cfg.get("early_stopping", {}) or {}
+        self.es_enabled: bool = bool(es_cfg.get("enabled", False))
+        self.es_patience: int = int(es_cfg.get("patience", 12))
+        self.es_min_delta: float = float(es_cfg.get("min_delta", 1.0e-4))
+        self.es_monitor: str = str(es_cfg.get("monitor", "total"))
+        self.es_best_value: float = float("inf")
+        self.es_epochs_since_improvement: int = 0
+
         # Summary writer for TensorBoard (events.out.tfevents)
         self.writer = SummaryWriter(log_dir=str(self.exp_dir))
 
@@ -653,6 +662,40 @@ class Trainer:
                 self._log(msg)
 
             self._save_checkpoint(epoch, val_metrics, is_best=is_best)
+
+            # ----- Early stopping (Phase 2.5) -----
+            if self.es_enabled:
+                # Look up the monitored metric; fall back to val_total if the
+                # requested key is not present in val_metrics.
+                monitor_value = float(
+                    val_metrics.get(self.es_monitor, val_metrics["total"])
+                )
+
+                if monitor_value < (self.es_best_value - self.es_min_delta):
+                    # Improvement (smaller than best by at least min_delta).
+                    prev = self.es_best_value
+                    self.es_best_value = monitor_value
+                    self.es_epochs_since_improvement = 0
+                    self._log(
+                        f"[Early Stop] '{self.es_monitor}' improved "
+                        f"{prev:.4f} -> {monitor_value:.4f} (delta>={self.es_min_delta})."
+                    )
+                else:
+                    self.es_epochs_since_improvement += 1
+                    self._log(
+                        f"[Early Stop] '{self.es_monitor}' no improvement "
+                        f"(value={monitor_value:.4f}, best={self.es_best_value:.4f}, "
+                        f"patience {self.es_epochs_since_improvement}/{self.es_patience})."
+                    )
+
+                if self.es_epochs_since_improvement >= self.es_patience:
+                    self._log(
+                        f"[Early Stop] Triggered at epoch {epoch}/{num_epochs}: "
+                        f"'{self.es_monitor}' has not improved by min_delta="
+                        f"{self.es_min_delta} for {self.es_patience} consecutive "
+                        f"epochs (best={self.es_best_value:.4f})."
+                    )
+                    break
 
         # Close resources
         self.writer.close()
