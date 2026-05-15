@@ -1,3 +1,22 @@
+"""
+Inference / visualization for a single trace.
+
+Resolution rules mirror evaluate.py:
+  --ckpt PATH    explicit
+  --exp ID       experiments/exp_{ID:03d}/best_model.pth
+  (default)      latest experiments/exp_*
+
+Output:
+  Always plots inline. If --save (default) is on, also writes the figure to
+  results/exp_{ID:03d}/inference/{split}_idx{N}.png and mirrors to Drive
+  results dir when mounted.
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -5,28 +24,20 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
-from src.dataset import build_dataloader, load_yaml
+from src.dataset import build_dataloader
 from src.models.network import SeisMambaKAN
 from src.metrics import (
     pick_phases,
     _extract_heads_from_outputs,
     _extract_label_curves,
 )
-
-# ======================================================================
-# User configuration
-# ======================================================================
-
-# Path to trained model weights (state_dict)
-CKPT_PATH = Path(
-    "/content/drive/MyDrive/Proje_SeisMamba/SeisMambaKAN/experiments/exp_005/best_model.pth"
+from src.utils import (
+    is_drive_mounted,
+    load_all_configs,
+    project_root,
+    resolve_checkpoint,
+    resolve_experiment_dir,
 )
-
-# From which split to draw a sample
-SPLIT = "test"   # "val" or "test"
-
-# Fixed index inside first batch; set to None for random
-FIXED_INDEX: Optional[int] = None
 
 
 # ======================================================================
@@ -44,6 +55,8 @@ def plot_single_trace_in_notebook(
     sample_rate: float,
     title: str,
     trace_threshold: float,
+    save_path: Optional[Path] = None,
+    show: bool = True,
 ) -> None:
     """
     Plot a single seismic trace with all information overlaid:
@@ -136,58 +149,124 @@ def plot_single_trace_in_notebook(
     ax.legend(loc="upper right", fontsize=8)
 
     fig.tight_layout()
-    plt.show()
+    if save_path is not None:
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=150)
+        print(f"[INFER] Saved figure: {save_path}")
+    if show:
+        plt.show()
+    plt.close(fig)
+
+
+# ======================================================================
+# CLI
+# ======================================================================
+
+def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Single-trace inference + plot")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--exp", type=int, default=None, help="Experiment id (3-digit), else latest.")
+    g.add_argument("--ckpt", type=str, default=None, help="Explicit checkpoint path.")
+    p.add_argument("--split", choices=["val", "test"], default="test")
+    p.add_argument("--index", type=int, default=None,
+                   help="Sample index within first batch. Default: deterministic random.")
+    p.add_argument("--prefer", choices=["best", "last", "auto"], default="best")
+    p.add_argument("--no-save", action="store_true",
+                   help="Do not save the figure to results/.")
+    p.add_argument("--no-show", action="store_true",
+                   help="Do not call plt.show() (useful in headless mode).")
+    p.add_argument("--no-drive-mirror", action="store_true")
+    return p.parse_args(argv)
+
+
+def _infer_exp_id_from_path(path: Path) -> Optional[int]:
+    for part in path.parts:
+        m = re.match(r"^exp_(\d+)$", part)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def _mirror_to_drive(local_dir: Path, drive_root: str, exp_id: int) -> None:
+    if not is_drive_mounted() or not drive_root:
+        return
+    drive_target = Path(drive_root) / f"exp_{exp_id:03d}"
+    drive_target.mkdir(parents=True, exist_ok=True)
+    files = [p for p in local_dir.rglob("*") if p.is_file()]
+    for f in files:
+        rel = f.relative_to(local_dir)
+        out = drive_target / rel
+        out.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(f, out)
 
 
 # ======================================================================
 # Main
 # ======================================================================
 
-def main() -> None:
+def main(argv: Optional[list[str]] = None) -> None:
+    args = _parse_args(argv)
+
     # ------------------------------------------------------------------
     # Load configs
     # ------------------------------------------------------------------
-    cfg_path = Path("configs/config.yaml")
-    model_cfg_path = Path("configs/model_config.yaml")
-    paths_cfg_path = Path("configs/paths.yaml")
-
-    main_cfg = load_yaml(cfg_path)
-    model_cfg = load_yaml(model_cfg_path)
-    paths_cfg = load_yaml(paths_cfg_path)
+    main_cfg, model_cfg, paths_cfg = load_all_configs()
 
     metrics_cfg = main_cfg.get("metrics", {})
     sample_rate = float(metrics_cfg.get("sample_rate", 100.0))
     detection_cfg = metrics_cfg.get("detection", {})
     picker_cfg = metrics_cfg.get("picker", {})
-
     trace_threshold = float(detection_cfg.get("trace_threshold", 0.5))
+
+    # ------------------------------------------------------------------
+    # Resolve checkpoint + exp id
+    # ------------------------------------------------------------------
+    exp_root = project_root() / paths_cfg.get("experiments", {}).get("root_dir", "experiments")
+
+    if args.ckpt:
+        ckpt_path = Path(args.ckpt)
+        if not ckpt_path.exists():
+            raise FileNotFoundError(ckpt_path)
+        exp_id = _infer_exp_id_from_path(ckpt_path)
+    else:
+        exp_dir = resolve_experiment_dir(exp_root, exp_id=args.exp)
+        if exp_dir is None:
+            raise FileNotFoundError(
+                f"No experiments under {exp_root}. Train first, or pass --ckpt."
+            )
+        ckpt_path = resolve_checkpoint(exp_dir, prefer=args.prefer)
+        exp_id = _infer_exp_id_from_path(exp_dir)
 
     # ------------------------------------------------------------------
     # Device
     # ------------------------------------------------------------------
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[INFER] Using device: {device}")
+    print(f"[INFER] Checkpoint: {ckpt_path}")
+    print(f"[INFER] Exp id: {exp_id}, split: {args.split}")
 
     # ------------------------------------------------------------------
     # Build model and load weights
     # ------------------------------------------------------------------
     model = SeisMambaKAN(model_cfg).to(device)
 
-    # Safer torch.load (PyTorch >=2.1); fallback for older versions
     try:
-        state_dict = torch.load(CKPT_PATH, map_location=device, weights_only=True)
+        state_dict = torch.load(ckpt_path, map_location=device, weights_only=True)
     except TypeError:
-        state_dict = torch.load(CKPT_PATH, map_location=device)
+        state_dict = torch.load(ckpt_path, map_location=device)
+
+    # Accept both raw state_dict and full-state checkpoint
+    if isinstance(state_dict, dict) and "model_state_dict" in state_dict:
+        state_dict = state_dict["model_state_dict"]
 
     model.load_state_dict(state_dict)
     model.eval()
-    print(f"[INFER] Loaded weights from: {CKPT_PATH}")
 
     # ------------------------------------------------------------------
-    # Build DataLoader (test or val)
+    # DataLoader
     # ------------------------------------------------------------------
     loader = build_dataloader(
-        split=SPLIT,
+        split=args.split,
         cfg=main_cfg,
         paths_cfg=paths_cfg,
         is_train=False,
@@ -197,11 +276,11 @@ def main() -> None:
     x, labels = batch       # x: (B, T, C)
 
     B, T, C = x.shape
-    print(f"[INFER] Batch shape: x = {x.shape}, split = {SPLIT}")
+    print(f"[INFER] Batch shape: x = {x.shape}, split = {args.split}")
 
     # Choose example index
-    if FIXED_INDEX is not None:
-        idx = int(FIXED_INDEX) % B
+    if args.index is not None:
+        idx = int(args.index) % B
     else:
         rng = np.random.RandomState(123)
         idx = int(rng.randint(0, B))
@@ -339,9 +418,19 @@ def main() -> None:
         print("  Model did NOT detect an event → P/S not computed.")
 
     # ------------------------------------------------------------------
-    # Plot in notebook (no saving)
+    # Plot
     # ------------------------------------------------------------------
-    title = f"{SPLIT.upper()} sample idx={idx}"
+    title = f"{args.split.upper()} sample idx={idx}"
+
+    save_path: Optional[Path] = None
+    if not args.no_save:
+        results_cfg = paths_cfg.get("results", {})
+        results_root = project_root() / results_cfg.get("root_dir", "results")
+        exp_bucket = f"exp_{exp_id:03d}" if exp_id is not None else "exp_unknown"
+        out_dir = results_root / exp_bucket / "inference"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        save_path = out_dir / f"{args.split}_idx{idx}.png"
+
     plot_single_trace_in_notebook(
         waveform=waveform_i,
         det_true=det_true_i,
@@ -353,7 +442,16 @@ def main() -> None:
         sample_rate=sample_rate,
         title=title,
         trace_threshold=trace_threshold,
+        save_path=save_path,
+        show=not args.no_show,
     )
+
+    # Mirror to Drive
+    if save_path is not None and exp_id is not None and not args.no_drive_mirror:
+        drive_root = paths_cfg.get("results", {}).get("drive_root_dir")
+        if drive_root:
+            _mirror_to_drive(save_path.parent.parent, drive_root, exp_id)
+            print(f"[INFER] Mirrored to {Path(drive_root) / f'exp_{exp_id:03d}'}")
 
 
 if __name__ == "__main__":

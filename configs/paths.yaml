@@ -1,68 +1,86 @@
 # configs/paths.yaml
+#
+# All environment-specific paths live here. Code never hardcodes paths;
+# it reads them from this file via src.utils.env_paths().
+#
+# Two "environments":
+#   - local   : developer machine (Windows/macOS/Linux IDE), used for editing.
+#   - colab   : Google Colab runtime; data is copied from Drive at setup time.
+#
+# Drive is a *storage backend* shared between local and colab — used for
+# processed data, mirrored experiments, and result artifacts.
 
 # =====================================================================
-# DATA PATHS CONFIGURATION
+# RAW + PROCESSED DATA PATHS (relative to project root in local/colab)
 # =====================================================================
 data:
-  # Directory containing raw CSV files
+  # Directory containing raw CSV files (only used by preprocess.py)
   raw_csv_dir: "data/raw/csv"
-
-  # Directory containing raw HDF5 files
+  # Directory containing raw HDF5 files (only used by preprocess.py)
   raw_hdf5_dir: "data/raw/hdf5"
 
   # STEAD dataset chunk configuration
   stead:
-    # Noise data chunks
     noise_chunks: ["chunk1"]
-
-    # Earthquake data chunks
     eq_chunks: ["chunk2", "chunk3", "chunk4", "chunk5", "chunk6"]
 
 # =====================================================================
-# PROCESSED DATA DIRECTORY STRUCTURE (WEB DATASET .tar SHARDS)
-# Used by dataset.py → _get_split_dir() → build_dataset()
+# PROCESSED DATA DIRECTORY STRUCTURE (WebDataset .tar shards)
+# Resolved by dataset.py -> _get_split_dir() relative to CWD.
+# In Colab these are populated by `run.py data` from Drive.
 # =====================================================================
 processed:
-  # Full dataset directories
   all:
-    # Training data directory
     train_dir: "data/processed/all/train"
-    # Validation data directory
     val_dir:   "data/processed/all/val"
-    # Test data directory
     test_dir:  "data/processed/all/test"
-
-  # Sample dataset directories (small smoke-test subset)
   sample:
-    # Training data directory (sample)
     train_dir: "data/processed/sample/train"
-    # Validation data directory (sample)
     val_dir:   "data/processed/sample/val"
-    # Test data directory (sample)
     test_dir:  "data/processed/sample/test"
 
 # =====================================================================
 # WEBDATASET CONFIGURATION
-# (tar shard naming; writing scripts can use this)
 # =====================================================================
 webdataset:
-  shard_size: 2048                 # Number of samples per .tar file
-
-  # Training data .tar file naming pattern
+  shard_size: 2048
   train_pattern: "train_{:06d}.tar"
-
-  # Validation data .tar file naming pattern
   val_pattern:   "val_{:06d}.tar"
-
-  # Test data .tar file naming pattern
   test_pattern:  "test_{:06d}.tar"
 
 # =====================================================================
-# EXPERIMENTS / OUTPUT ROOT (OPTIONAL, FOR ORGANIZATION)
-# Trainer currently uses training.output_dir from config.yaml to
-# create experiments/exp_XXX, but this block keeps paths centralized.
+# EXPERIMENTS (training output) — local + mirrored on Drive
 # =====================================================================
 experiments:
-  # Root directory under project folder where experiments will live
+  # Local (Colab cwd or local dev) root for experiments/exp_XXX
   root_dir: "experiments"
+  # Drive mirror; written to during training (set to null to disable mirroring)
   drive_root_dir: "/content/drive/MyDrive/Proje_SeisMamba/SeisMambaKAN/experiments"
+
+# =====================================================================
+# RESULTS (eval / inference artifacts) — local + mirrored on Drive
+# =====================================================================
+results:
+  root_dir: "results"
+  drive_root_dir: "/content/drive/MyDrive/Proje_SeisMamba/SeisMambaKAN/results"
+
+# =====================================================================
+# DRIVE — single source of truth for Drive-side paths used by run.py
+# =====================================================================
+drive:
+  project_root:  "/content/drive/MyDrive/Proje_SeisMamba/SeisMambaKAN"
+  data_dir:      "/content/drive/MyDrive/Proje_SeisMamba/SeisMambaKAN/data/processed"
+  experiments_dir: "/content/drive/MyDrive/Proje_SeisMamba/SeisMambaKAN/experiments"
+  results_dir:   "/content/drive/MyDrive/Proje_SeisMamba/SeisMambaKAN/results"
+  wheels_dir:    "/content/drive/MyDrive/Proje_SeisMamba/SeisMambaKAN/wheels"
+
+# =====================================================================
+# COLAB — runtime layout
+# =====================================================================
+colab:
+  project_root: "/content/SeisMambaKAN"
+  git_repo_url: "https://github.com/huseyinokanozturk/SeisMambaKAN.git"
+  # Torch wheel target (must match wheels stored under drive.wheels_dir)
+  target_torch_version: "2.5.1+cu121"
+  mamba_wheel_name:  "mamba_ssm-2.2.6.post3-cp312-cp312-linux_x86_64.whl"
+  causal_wheel_name: "causal_conv1d-1.5.3.post1-cp312-cp312-linux_x86_64.whl"

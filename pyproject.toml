@@ -1,0 +1,17 @@
+[project]
+name = "seismambakan"
+version = "0.1.0"
+description = "Hybrid Mamba+KAN deep learning model for earthquake detection and phase picking."
+requires-python = ">=3.10"
+
+[tool.pyright]
+include = ["src", "scripts", "evaluate.py", "inference.py", "train.py", "run.py", "colab_setup.py"]
+extraPaths = ["."]
+reportMissingImports = "warning"
+reportMissingModuleSource = "none"
+
+[tool.basedpyright]
+include = ["src", "scripts", "evaluate.py", "inference.py", "train.py", "run.py", "colab_setup.py"]
+extraPaths = ["."]
+reportMissingImports = "warning"
+reportMissingModuleSource = "none"

@@ -15,6 +15,7 @@ from tqdm.auto import tqdm
 from .dataset import build_dataloader, load_yaml
 from .losses import build_loss_fn
 from .models.network import SeisMambaKAN
+from .utils import apply_dotted_overrides
 
 
 # =============================================================================
@@ -533,7 +534,18 @@ class Trainer:
 # =============================================================================
 
 
-def main() -> None:
+def main(
+    overrides: Dict[str, Any] | None = None,
+    model_overrides: Dict[str, Any] | None = None,
+) -> None:
+    """
+    Training entry point.
+
+    overrides:        dotted-key overrides applied to main config (config.yaml).
+                      e.g. {"training.epochs": 5, "training.batch_size": 128}
+    model_overrides:  dotted-key overrides applied to model_config.yaml.
+                      e.g. {"model.dropout": 0.2}
+    """
     # ------------------------------------------------------------------
     # Load configs (paths are fixed; edit here if needed)
     # ------------------------------------------------------------------
@@ -552,6 +564,16 @@ def main() -> None:
     main_cfg = load_yaml(main_cfg_path)
     model_cfg = load_yaml(model_cfg_path)
     paths_cfg = load_yaml(paths_cfg_path)
+
+    # ------------------------------------------------------------------
+    # Apply CLI overrides (from run.py)
+    # ------------------------------------------------------------------
+    if overrides:
+        apply_dotted_overrides(main_cfg, overrides)
+        print(f"[Trainer] applied main-config overrides: {overrides}")
+    if model_overrides:
+        apply_dotted_overrides(model_cfg, model_overrides)
+        print(f"[Trainer] applied model-config overrides: {model_overrides}")
 
     # ------------------------------------------------------------------
     # Device and seed

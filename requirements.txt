@@ -1,4 +1,4 @@
-# --- Core ML dependencies (torch is handled in colab_setup.py) ---
+# --- Core ML dependencies (torch is handled in run.py setup / colab_setup.py) ---
 # --- Model Architecture (Mamba & KAN) ---
 
 # Required for Mamba GPU kernels
@@ -12,8 +12,14 @@ webdataset
 pyyaml
 numpy
 pandas
+h5py
+scikit-learn
 
 # --- Training Monitoring & Progress Tracking ---
 tensorboard
 tqdm
 matplotlib
+
+# --- CLI (run.py) ---
+typer>=0.12
+rich>=13.7
