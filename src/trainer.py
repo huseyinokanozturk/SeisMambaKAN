@@ -308,12 +308,12 @@ class Trainer:
         # Step/epoch counters for ETA logging
         self.total_epochs: int = int(self.train_cfg.get("epochs", 1))
 
-        # WebDataset (IterableDataset) için len() olmayabileceği için try/except
-        try:
-            self.steps_per_epoch: int | None = len(self.train_loader)
-        except TypeError:
-            self.steps_per_epoch = None
-
+        # WebDataset is an IterableDataset, so len(loader) raises. Use the
+        # same shard-count heuristic that main() / build_scheduler use so the
+        # setup panel and the tqdm bars know the real step count.
+        self.steps_per_epoch: int | None = estimate_steps_per_epoch(
+            self.train_loader, self.main_cfg, self.paths_cfg, split="train"
+        )
         if self.steps_per_epoch is not None:
             self.total_steps: int | None = self.steps_per_epoch * self.total_epochs
         else:
