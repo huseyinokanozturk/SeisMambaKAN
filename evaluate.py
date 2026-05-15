@@ -26,7 +26,7 @@ import argparse
 import re
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
@@ -61,6 +61,36 @@ def _infer_exp_id_from_path(path: Path) -> Optional[int]:
         if m:
             return int(m.group(1))
     return None
+
+
+def _safe_torch_load(path: Path, device: torch.device) -> Any:
+    """
+    torch.load wrapper that prefers weights_only=True (PyTorch >=2.1).
+    Falls back to weights_only=False for older versions or for full-state
+    checkpoints that contain non-tensor objects (e.g. optimizer state).
+    """
+    try:
+        return torch.load(path, map_location=device, weights_only=True)
+    except TypeError:
+        return torch.load(path, map_location=device)
+    except Exception:
+        return torch.load(path, map_location=device, weights_only=False)
+
+
+def _print_metrics_summary(metrics: dict) -> None:
+    """Pretty-print key scalar metrics, recursing into nested dicts."""
+    def _walk(obj: Any, prefix: str = "") -> None:
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                _walk(v, f"{prefix}{k}." if prefix else f"{k}.")
+        elif isinstance(obj, (int, float)) and not isinstance(obj, bool):
+            label = prefix.rstrip(".")
+            print(f"  {label:40s} = {obj:.6f}" if isinstance(obj, float)
+                  else f"  {label:40s} = {obj}")
+    if not metrics:
+        print("  (empty metrics dict)")
+        return
+    _walk(metrics)
 
 
 def _mirror_to_drive(local_dir: Path, drive_root: str, exp_id: int) -> None:
@@ -112,8 +142,7 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     # ----- build model -----------------------------------------------------
     model = SeisMambaKAN(model_cfg).to(device)
-    state = torch.load(ckpt_path, map_location=device)
-    # accept both raw state_dict and full-state checkpoint
+    state = _safe_torch_load(ckpt_path, device)
     if isinstance(state, dict) and "model_state_dict" in state:
         state = state["model_state_dict"]
     model.load_state_dict(state)
@@ -159,9 +188,8 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     # ----- short summary ---------------------------------------------------
     print("\n[Eval] summary")
-    for k, v in metrics.items():
-        if isinstance(v, (int, float)):
-            print(f"  {k:30s} = {v}")
+    _print_metrics_summary(metrics)
+    print(f"\n[Eval] full metrics file: {out_dir}/metrics/{args.split}_metrics.json")
 
 
 if __name__ == "__main__":

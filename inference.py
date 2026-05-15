@@ -250,12 +250,15 @@ def main(argv: Optional[list[str]] = None) -> None:
     # ------------------------------------------------------------------
     model = SeisMambaKAN(model_cfg).to(device)
 
+    # Prefer weights_only=True (silences the torch 2.4+ deprecation warning).
     try:
         state_dict = torch.load(ckpt_path, map_location=device, weights_only=True)
     except TypeError:
         state_dict = torch.load(ckpt_path, map_location=device)
+    except Exception:
+        # Full-state checkpoint with non-tensor entries (e.g. optimizer state).
+        state_dict = torch.load(ckpt_path, map_location=device, weights_only=False)
 
-    # Accept both raw state_dict and full-state checkpoint
     if isinstance(state_dict, dict) and "model_state_dict" in state_dict:
         state_dict = state_dict["model_state_dict"]
 
