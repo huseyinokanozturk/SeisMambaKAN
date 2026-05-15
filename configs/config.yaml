@@ -79,7 +79,10 @@ labels:
     type: "gaussian"
 
     # Standard deviation of the Gaussian (in samples) used for detection target.
-    sigma_samples: 8.0
+    # 10 samples = 100ms @ 100Hz. PhaseNet/EQTransformer-style; tight enough to
+    # encourage sharp peak prediction while leaving usable gradient over a few
+    # tens of timesteps. (Was 8.0; Phase 1.2.)
+    sigma_samples: 10.0
 
     # Peak value of the Gaussian target.
     peak_value: 1.0
@@ -90,10 +93,10 @@ labels:
 
   # Phase picking heads for P and S phases.
   phase:
-    # P-phase Gaussian label parameters.
-    p_sigma_samples: 8.0
+    # P-phase Gaussian label parameters. 10 samples = 100ms (Phase 1.2).
+    p_sigma_samples: 10.0
     # S-phase Gaussian label parameters.
-    s_sigma_samples: 8.0
+    s_sigma_samples: 10.0
 
     # Peak value for both P and S Gaussian labels.
     peak_value: 1.0
@@ -247,11 +250,15 @@ loss:
   # Phase heads loss: detection-masked, peak-weighted MSE on Gaussian targets
   # --------------------------------------------------------------------------
   phase:
-    loss_type: "masked_peak_mse"  
-    # Peak weighting: w_t = 1 + peak_weight_scale * y_phase(t)
-    peak_weight_scale: 2.0        # k in w_t = 1 + k * y(t); tuneable
+    loss_type: "masked_peak_mse"
+    # Peak weighting: w_t = 1 + peak_weight_scale * y_phase(t).
+    # 5.0 means the Gaussian-peak timesteps weigh ~6x more than the tail.
+    # (Was 2.0; Phase 1.3.) Bumped to focus learning on peak position; the
+    # gradient-balance budget allows this because phase contributions are
+    # capped by per-sample mask normalization (Phase 1.1).
+    peak_weight_scale: 5.0
     use_detection_mask: true      # multiply by detection label to focus on event window
-    normalize_by_mask: true       # divide by sum(mask * weights) instead of T
+    normalize_by_mask: true       # per-sample mask normalization (Phase 1.1)
     # Clamp predictions to [0, 1] before computing MSE (since labels are in [0, 1])
     clamp_predictions: true
     clamp_min: 0.0
@@ -259,12 +266,14 @@ loss:
     eps: 1.0e-6                   # for safe normalization
 
   # --------------------------------------------------------------------------
-  # Optional center-based loss (soft-argmax on P/S), disabled for now
+  # Optional center-based loss (soft-argmax on P/S), disabled.
+  # Re-enable only after the baseline masked-MSE loss is stable; soft-argmax
+  # adds an arrival-time L1 term whose scale is hard to reconcile early on.
   # --------------------------------------------------------------------------
   center_loss:
-    enabled: true         # keep off in first experiments
-    weight: 0.05            # lambda_center; non-zero only if enabled = true
-    temperature: 10.0      # controls sharpness of soft-argmax over time axis
+    enabled: false        # Phase 1.4: disabled until baseline is stable.
+    weight: 0.05          # lambda_center; non-zero only if enabled = true
+    temperature: 10.0     # controls sharpness of soft-argmax over time axis
 
 metrics:
   # ============================================================================

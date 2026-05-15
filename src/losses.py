@@ -262,7 +262,18 @@ class SeisMambaKANLoss(nn.Module):
                 w_t = (1 + peak_weight_scale * phase_target[t])
                 if peak_weight_scale > 0, otherwise w_t = 1.
           - Optionally multiply by detection mask to focus on event window.
-          - Optionally normalize by total mask weight instead of sequence length.
+          - Per-sample mask normalization: each sample contributes equally to
+            the final loss when it has an event window; pure-noise samples
+            contribute exactly zero (no gradient on the phase head from noise).
+
+        Phase 1.1 fix:
+            The previous implementation normalized by the BATCH-wide weight
+            sum and, when that sum was ~0 (e.g. a fully-noise batch), fell
+            back to sq_error.mean() — which is the un-masked mean over the
+            entire (B, T) tensor. That gave spurious phase-head gradient on
+            noise samples and dominated mixed batches when the mask sum was
+            small. The new implementation normalizes per-sample and averages
+            only over event-bearing samples.
         """
         if self.phase_loss_type not in {"masked_peak_mse", "mse"}:
             raise ValueError(f"Unsupported phase loss_type: {self.phase_loss_type}")
@@ -271,31 +282,45 @@ class SeisMambaKANLoss(nn.Module):
         if self.phase_clamp_predictions:
             phase_pred = phase_pred.clamp(self.phase_clamp_min, self.phase_clamp_max)
 
-        # Squared error
-        sq_error = (phase_pred - phase_target) ** 2  # (B, T)
+        # Squared error (B, T)
+        sq_error = (phase_pred - phase_target) ** 2
 
-        # Peak weighting based on target amplitude
+        # Peak weighting based on target amplitude (B, T)
         if self.phase_peak_weight_scale > 0.0:
             weights = 1.0 + self.phase_peak_weight_scale * phase_target
         else:
             weights = torch.ones_like(phase_target)
 
-        # Optional detection mask
+        # Optional detection mask (B, T)
         if self.phase_use_det_mask:
-            # det_target is already in [0, 1]; treat it as soft mask
             weights = weights * det_target
 
-        weighted_error = sq_error * weights
+        if not self.phase_normalize_by_mask:
+            # Simple unnormalized mean (rare path; kept for backward compatibility).
+            return (sq_error * weights).mean()
 
-        if self.phase_normalize_by_mask:
-            denom = weights.sum()
-            if denom <= self.phase_eps:
-                # Fallback to simple mean if mask is effectively zero (e.g., pure noise)
-                return sq_error.mean()
-            return weighted_error.sum() / denom
+        # ----- Per-sample normalization -----
+        # Numerator and denominator per sample (B,)
+        num_per_sample = (sq_error * weights).sum(dim=-1)
+        denom_per_sample = weights.sum(dim=-1)
 
-        # Simple unnormalized mean
-        return weighted_error.mean()
+        event_mask = denom_per_sample > self.phase_eps           # (B,) bool
+        n_event = event_mask.sum()
+
+        if int(n_event.item()) == 0:
+            # All-noise batch: phase head receives no gradient from this term.
+            return torch.zeros(
+                (), device=phase_pred.device, dtype=phase_pred.dtype
+            )
+
+        # Avoid division by ~0 on noise samples; their numerator is 0 so the
+        # result is masked back to 0 by the where().
+        per_sample_loss = torch.where(
+            event_mask,
+            num_per_sample / (denom_per_sample + self.phase_eps),
+            torch.zeros_like(num_per_sample),
+        )
+        return per_sample_loss.sum() / n_event.to(per_sample_loss.dtype)
 
     # --------------------------------------------------------------------- #
     # Optional center-based arrival time loss (soft-argmax)
