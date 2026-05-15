@@ -5,7 +5,6 @@ from typing import Any, Dict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch import amp
 
 
 
@@ -197,7 +196,7 @@ class SeisMambaKANLoss(nn.Module):
         return out
 
     # --------------------------------------------------------------------- #
-    # Detection loss (BCE / focal BCE)
+    # Detection loss (BCEWithLogits / focal BCE)
     # --------------------------------------------------------------------- #
     def _compute_detection_loss(
         self,
@@ -207,52 +206,39 @@ class SeisMambaKANLoss(nn.Module):
         """
         Compute detection loss.
 
-        Assumes 'pred' has already passed through a sigmoid activation:
-            pred in [0, 1].
+        Convention (Phase 0): the detection head outputs LOGITS (no sigmoid).
+        We use F.binary_cross_entropy_with_logits, which is AMP-safe and
+        numerically stable via the log-sum-exp trick — no autocast disable
+        needed, no eps clamp.
 
-        NOTE:
-            BCE with sigmoid outputs is not AMP-safe under autocast.
-            To avoid PyTorch's autocast restriction, we *temporarily disable*
-            autocast for this block and run BCE in float32.
+        Focal variant computes pt = sigmoid(logits) * target + (1-sigmoid) * (1-target),
+        then scales BCE by alpha * (1-pt)**gamma.
         """
-        # Figure out device type for autocast context
-        device_type = "cuda" if pred.is_cuda else "cpu"
-
-        # Temporarily disable autocast inside this block
-        with amp.autocast(device_type=device_type, enabled=False):
-            # Force float32 for stable BCE computation (gradient still flows)
-            pred_fp32 = pred.float()
-            target_fp32 = target.float()
-
-            # Clamp predictions for numerical stability
-            pred_fp32 = pred_fp32.clamp(self.det_eps, 1.0 - self.det_eps)
-
-            # Base BCE loss per element
-            bce = F.binary_cross_entropy(
-                pred_fp32,
-                target_fp32,
-                reduction="none",
+        # pos_weight: scalar broadcast tensor for class imbalance (y=1 weighting)
+        pos_weight = None
+        if self.det_positive_weight != 1.0 and self.det_positive_weight > 0.0:
+            pos_weight = torch.tensor(
+                self.det_positive_weight,
+                device=pred.device,
+                dtype=pred.dtype,
             )
 
-            # Optional positive-class weighting
-            if self.det_positive_weight != 1.0 and self.det_positive_weight > 0.0:
-                pos_weight = torch.ones_like(target_fp32)
-                pos_weight = torch.where(
-                    target_fp32 > 0.5,
-                    torch.full_like(target_fp32, self.det_positive_weight),
-                    pos_weight,
-                )
-                bce = bce * pos_weight
+        # Per-element BCE on logits
+        bce = F.binary_cross_entropy_with_logits(
+            pred,
+            target,
+            reduction="none",
+            pos_weight=pos_weight,
+        )
 
-            # Optional focal modulation
-            if self.det_use_focal or self.det_loss_type == "focal_bce":
-                # pt is the probability assigned to the true class
-                pt = torch.where(target_fp32 > 0.5, pred_fp32, 1.0 - pred_fp32)
-                focal_factor = (1.0 - pt) ** self.det_focal_gamma
-                # Standard focal formulation usually includes alpha; we fold it in here
-                bce = self.det_focal_alpha * focal_factor * bce
+        # Optional focal modulation
+        if self.det_use_focal or self.det_loss_type == "focal_bce":
+            probs = torch.sigmoid(pred)
+            pt = torch.where(target > 0.5, probs, 1.0 - probs)
+            focal_factor = (1.0 - pt) ** self.det_focal_gamma
+            bce = self.det_focal_alpha * focal_factor * bce
 
-            return bce.mean()
+        return bce.mean()
 
 
 

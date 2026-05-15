@@ -120,8 +120,11 @@ heads:
 
   detection:
     type: "ConvHead1D"
+    # Head outputs LOGITS now (no sigmoid). Loss uses BCEWithLogitsLoss for
+    # numerical stability + AMP safety. Downstream code (metrics.py, inference.py)
+    # applies torch.sigmoid explicitly when probabilities are needed.
     out_channels: 1
-    activation: "sigmoid"   # Output range [0,1] for event probability
+    activation: "none"
     target: "detection"
     loss: "bce"             # Binary cross-entropy loss (readable by training loop)
 

@@ -103,7 +103,14 @@ def _extract_heads_from_outputs(
             f"Available keys: {list(outputs.keys())}"
         )
 
-    return outputs[det_key], outputs[p_key], outputs[s_key]
+    # Convention (Phase 0+): the detection head outputs LOGITS. Convert to
+    # probabilities here so all downstream thresholding code (trace_threshold,
+    # timestep_threshold, det_window_threshold, picker) keeps working unchanged.
+    # P/S heads continue to output unbounded Gaussian magnitudes; the picker
+    # clamps + thresholds them separately.
+    det_out = torch.sigmoid(outputs[det_key])
+
+    return det_out, outputs[p_key], outputs[s_key]
 
 
 def _extract_label_curves(

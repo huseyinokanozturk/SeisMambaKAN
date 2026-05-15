@@ -176,8 +176,21 @@ training:
   # Total number of training epochs (used later in the trainer).
   epochs: 20
 
-  # Initial learning rate (optimizer configuration will use this).
-  learning_rate: 5.0e-4
+  # Peak / target learning rate. With scheduler=onecycle this is max_lr.
+  learning_rate: 3.0e-4
+
+  # --- Stability knobs (Phase 0) ---
+  # Gradient L2 norm clip applied after scaler.unscale_; 0 or null disables.
+  grad_clip_max_norm: 1.0
+
+  # LR scheduler. "onecycle" -> OneCycleLR; "none" -> no scheduler.
+  scheduler: "onecycle"
+  scheduler_pct_start: 0.05          # OneCycleLR warmup fraction
+  scheduler_div_factor: 25.0         # initial_lr = max_lr / div_factor
+  scheduler_final_div_factor: 1.0e4  # min_lr   = initial_lr / final_div_factor
+
+  # NaN/Inf guard: skip step on non-finite loss; abort after N consecutive.
+  nan_threshold: 10
 
 dataloader:
   # Number of worker processes for PyTorch DataLoader.

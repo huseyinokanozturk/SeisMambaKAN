@@ -98,19 +98,102 @@ def build_optimizer(
     main_cfg: Dict[str, Any],
     model_cfg: Dict[str, Any],
 ) -> torch.optim.Optimizer:
-    """Create Adam optimizer using training and regularization configs."""
+    """Create AdamW optimizer using training and regularization configs."""
     train_cfg = main_cfg.get("training", {})
     lr = float(train_cfg.get("learning_rate", 3.0e-4))
 
     reg_cfg = model_cfg.get("regularization", {})
     weight_decay = float(reg_cfg.get("weight_decay", 0.0))
 
-    optimizer = torch.optim.Adam(
+    # AdamW (not Adam): decoupled weight decay, matches modern training recipes.
+    optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=lr,
         weight_decay=weight_decay,
     )
     return optimizer
+
+
+def estimate_steps_per_epoch(
+    loader: DataLoader,
+    main_cfg: Dict[str, Any],
+    paths_cfg: Dict[str, Any],
+    split: str = "train",
+) -> int | None:
+    """
+    Return an int estimate of (steps/epoch) for any DataLoader.
+
+    For map-style datasets: len(loader).
+    For WebDataset IterableDataset: estimate via n_shards * shard_size / batch.
+    Returns None if no estimate is possible.
+    """
+    try:
+        return len(loader)  # works for map-style
+    except TypeError:
+        pass
+
+    from glob import glob
+    mode = main_cfg.get("data", {}).get("mode", "all")
+    processed_cfg = paths_cfg.get("processed", {})
+    split_dir_cfg = processed_cfg.get(mode, {}).get(f"{split}_dir")
+    if not split_dir_cfg:
+        return None
+
+    n_shards = len(sorted(glob(str(Path(split_dir_cfg) / "*.tar"))))
+    if n_shards == 0:
+        return None
+
+    shard_size = int(paths_cfg.get("webdataset", {}).get("shard_size", 2048))
+    batch_size = int(main_cfg.get("training", {}).get("batch_size", 32))
+    return max(1, (n_shards * shard_size) // batch_size)
+
+
+def build_scheduler(
+    optimizer: torch.optim.Optimizer,
+    main_cfg: Dict[str, Any],
+    steps_per_epoch: int | None,
+) -> torch.optim.lr_scheduler.LRScheduler | None:
+    """
+    Build per-step LR scheduler from training config.
+
+    Supported:
+      - "onecycle" -> OneCycleLR (warmup + cosine decay).
+      - "none"     -> no scheduler (returns None).
+
+    Returns None (with a warning) if total_steps cannot be determined.
+    """
+    train_cfg = main_cfg.get("training", {})
+    sched_type = str(train_cfg.get("scheduler", "none")).lower()
+
+    if sched_type == "none":
+        return None
+
+    if sched_type != "onecycle":
+        raise ValueError(f"Unsupported scheduler: {sched_type!r}")
+
+    epochs = int(train_cfg.get("epochs", 1))
+    if steps_per_epoch is None or steps_per_epoch <= 0:
+        print(
+            "[WARN] steps_per_epoch unknown; cannot build OneCycleLR. "
+            "Continuing without an LR scheduler."
+        )
+        return None
+
+    total_steps = max(1, steps_per_epoch * epochs)
+    max_lr = float(train_cfg.get("learning_rate", 3.0e-4))
+    pct_start = float(train_cfg.get("scheduler_pct_start", 0.05))
+    div_factor = float(train_cfg.get("scheduler_div_factor", 25.0))
+    final_div_factor = float(train_cfg.get("scheduler_final_div_factor", 1.0e4))
+
+    return torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=max_lr,
+        total_steps=total_steps,
+        pct_start=pct_start,
+        anneal_strategy="cos",
+        div_factor=div_factor,
+        final_div_factor=final_div_factor,
+    )
 
 
 # =============================================================================
@@ -136,12 +219,14 @@ class Trainer:
         ckpt_dir: Path,
         use_amp: bool,
         use_channels_last: bool,
+        scheduler: torch.optim.lr_scheduler.LRScheduler | None = None,
         mirror_exp_dir: Path | None = None,
         mirror_ckpt_dir: Path | None = None,
     ) -> None:
         self.model = model
         self.loss_fn = loss_fn
         self.optimizer = optimizer
+        self.scheduler = scheduler
         self.device = device
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -165,6 +250,14 @@ class Trainer:
 
         # AMP scaler (new torch.amp API)
         self.scaler = amp.GradScaler(enabled=self.use_amp)
+
+        # --- Stability knobs (Phase 0) ---
+        self.grad_clip_max_norm: float = float(
+            self.train_cfg.get("grad_clip_max_norm", 0.0) or 0.0
+        )
+        self.nan_threshold: int = int(self.train_cfg.get("nan_threshold", 10))
+        self.consecutive_nan_count: int = 0
+        self.global_step: int = 0
 
         # Summary writer for TensorBoard (events.out.tfevents)
         self.writer = SummaryWriter(log_dir=str(self.exp_dir))
@@ -295,9 +388,45 @@ class Trainer:
                 loss_dict = self.loss_fn(outputs, labels)
                 total_loss = loss_dict["total"]
 
+            # ----- NaN / Inf guard -----
+            if not torch.isfinite(total_loss):
+                self.consecutive_nan_count += 1
+                self._log(
+                    f"[WARN] Non-finite loss at epoch {epoch} step "
+                    f"{self.global_step} (consecutive_nan={self.consecutive_nan_count}); "
+                    "skipping this step."
+                )
+                if self.consecutive_nan_count >= self.nan_threshold:
+                    raise RuntimeError(
+                        f"Aborting: {self.consecutive_nan_count} consecutive "
+                        f"non-finite training losses (threshold={self.nan_threshold})."
+                    )
+                continue
+            else:
+                self.consecutive_nan_count = 0
+
+            # ----- Backward + grad clip + step -----
             self.scaler.scale(total_loss).backward()
+            if self.grad_clip_max_norm > 0:
+                # Unscale before clipping so the norm is in real-loss units.
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    max_norm=self.grad_clip_max_norm,
+                )
             self.scaler.step(self.optimizer)
             self.scaler.update()
+
+            # Per-step LR scheduler (OneCycleLR is per-step)
+            if self.scheduler is not None:
+                try:
+                    self.scheduler.step()
+                except Exception as e:
+                    # OneCycleLR raises after total_steps is exhausted; absorb it
+                    # so the rest of training/eval can still complete.
+                    self._log(f"[WARN] scheduler.step() raised {type(e).__name__}: {e}")
+                    self.scheduler = None
+            self.global_step += 1
 
             # Detach scalars for logging
             loss_cpu = {k: float(v.detach().cpu().item()) for k, v in loss_dict.items()}
@@ -483,6 +612,7 @@ class Trainer:
             remaining_epochs = num_epochs - epoch
             eta = avg_epoch_time * remaining_epochs
 
+            current_lr = self.optimizer.param_groups[0]["lr"]
             log_msg = (
                 f"[Epoch {epoch:03d}] "
                 f"Train total={train_metrics['total']:.4f}, "
@@ -490,10 +620,12 @@ class Trainer:
                 f"Val det={val_metrics['detection']:.4f}, "
                 f"Val p={val_metrics['p']:.4f}, "
                 f"Val s={val_metrics['s']:.4f} | "
+                f"lr={current_lr:.2e} | "
                 f"epoch_time={self._format_seconds(epoch_time)} | "
                 f"elapsed={self._format_seconds(elapsed)} | "
                 f"eta={self._format_seconds(eta)}"
             )
+            self.writer.add_scalar("train/lr", current_lr, epoch)
             self._log(log_msg)
 
             current_val = val_metrics["total"]
@@ -644,7 +776,7 @@ def main(
     )
 
     # ------------------------------------------------------------------
-    # Model, loss, optimizer
+    # Model, loss, optimizer, scheduler
     # ------------------------------------------------------------------
     model, loss_fn, use_amp, use_channels_last = build_model_and_loss(
         main_cfg,
@@ -652,6 +784,17 @@ def main(
         device,
     )
     optimizer = build_optimizer(model, main_cfg, model_cfg)
+
+    # Estimate steps/epoch for OneCycleLR. WebDataset is IterableDataset so
+    # len(loader) often fails — estimate from shard count instead.
+    steps_per_epoch = estimate_steps_per_epoch(train_loader, main_cfg, paths_cfg, split="train")
+    scheduler = build_scheduler(optimizer, main_cfg, steps_per_epoch)
+    if scheduler is not None:
+        print(
+            f"[Trainer] scheduler={type(scheduler).__name__} "
+            f"steps_per_epoch={steps_per_epoch} "
+            f"total_steps={(steps_per_epoch or 0) * int(main_cfg.get('training', {}).get('epochs', 1))}"
+        )
 
     # ------------------------------------------------------------------
     # Trainer and run
@@ -670,6 +813,7 @@ def main(
         ckpt_dir=ckpt_dir,
         use_amp=use_amp,
         use_channels_last=use_channels_last,
+        scheduler=scheduler,
         mirror_exp_dir=mirror_exp_dir,
         mirror_ckpt_dir=mirror_ckpt_dir,
     )
