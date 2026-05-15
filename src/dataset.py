@@ -673,17 +673,33 @@ def build_dataloader(
             X: Tensor of shape (B, T, C)
             labels: dict with batched label tensors.
     """
+    import os as _os
+
     dataset = build_dataset(split, cfg, paths_cfg, is_train=is_train)
 
     train_cfg = cfg["training"]
     dl_cfg = cfg.get("dataloader", {})
 
     batch_size = int(train_cfg.get("batch_size", 32))
-    num_workers = int(dl_cfg.get("num_workers", 4))
+    requested_workers = int(dl_cfg.get("num_workers", 4))
     pin_memory = bool(dl_cfg.get("pin_memory", True))
     persistent_workers = bool(dl_cfg.get("persistent_workers", True))
     prefetch_factor = int(dl_cfg.get("prefetch_factor", 2))
     drop_last = bool(dl_cfg.get("drop_last", is_train))
+
+    # WebDataset distributes shards across workers, one shard per worker on
+    # startup. If num_workers > n_shards, some workers receive zero shards
+    # and webdataset's empty_check raises ValueError. Also, exceeding the
+    # number of CPU cores buys nothing and slows IO.
+    split_dir = _get_split_dir(split, cfg, paths_cfg)
+    n_shards = len(sorted(glob(str(Path(split_dir) / "*.tar"))))
+    cpu_cap = max(1, (_os.cpu_count() or 1))
+    num_workers = max(0, min(requested_workers, n_shards, cpu_cap))
+    if num_workers != requested_workers:
+        print(
+            f"[Dataset:{split}] capping num_workers {requested_workers} -> "
+            f"{num_workers} (shards={n_shards}, cpus={cpu_cap})"
+        )
 
     # DataLoader kwargs (handle num_workers=0 case for prefetch_factor/persistent_workers)
     loader_kwargs = {
