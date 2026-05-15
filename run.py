@@ -324,15 +324,39 @@ def status() -> None:
     console.print(env_table)
 
     # Data shards present?
+    configured_mode = main_cfg.get("data", {}).get("mode")
+    shard_counts: dict[str, dict[str, int]] = {"all": {}, "sample": {}}
     data_table = Table(title="Local data shards", expand=False)
     data_table.add_column("mode/split")
     data_table.add_column("count", justify="right")
+    data_table.add_column("", justify="left")
     for mode in ("all", "sample"):
         for split in ("train", "val", "test"):
             d = root / "data" / "processed" / mode / split
             n = len(list(d.glob("*.tar"))) if d.exists() else 0
-            data_table.add_row(f"{mode}/{split}", str(n))
+            shard_counts[mode][split] = n
+            tag = " ← config" if mode == configured_mode else ""
+            data_table.add_row(f"{mode}/{split}", str(n), tag)
     console.print(data_table)
+
+    # Consistency check: does configured mode have data?
+    if configured_mode in ("all", "sample"):
+        cfg_counts = shard_counts[configured_mode]
+        if cfg_counts.get("train", 0) == 0:
+            other_mode = "sample" if configured_mode == "all" else "all"
+            other_has_data = shard_counts[other_mode].get("train", 0) > 0
+            hint = (
+                f"`run.py setup --data-mode {configured_mode}` (sync data), "
+                f"OR `run.py train --data-mode {other_mode}`"
+                if other_has_data
+                else f"`run.py setup --data-mode {configured_mode}` (sync data)"
+            )
+            _warn(
+                f"config.data.mode = '{configured_mode}' but "
+                f"data/processed/{configured_mode}/train is empty. Fix: " + hint
+            )
+        else:
+            _ok(f"config.data.mode = '{configured_mode}' has data ({cfg_counts['train']} train shards).")
 
     # Experiments
     exp_root = root / paths_cfg.get("experiments", {}).get("root_dir", "experiments")

@@ -8,7 +8,10 @@
 data:
   # Dataset mode: "all" uses the full cleaned dataset,
   # "sample" uses a smaller subset mainly for debugging and smoke tests.
-  mode: "all"              # "all" or "sample"
+  # Default is "sample" so a fresh checkout is smoke-test friendly out of
+  # the box. Switch to "all" once you've run `python run.py setup
+  # --data-mode all` (or `python run.py data --mode all`) at least once.
+  mode: "sample"           # "all" or "sample"
 
   # Total number of samples to draw when mode == "sample".
   sample_size: 1300
