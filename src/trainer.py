@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, Tuple
@@ -10,7 +11,12 @@ import torch
 from torch import amp
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from tqdm.auto import tqdm
+# Use tqdm.std explicitly (NOT tqdm.auto). On Colab `tqdm.auto` will sometimes
+# pick `tqdm.notebook` (ipywidgets); when the script is launched via subprocess
+# (`!python run.py train` from a Colab cell) those widgets can't render and
+# tqdm falls back to a text mode that silently drops the custom bar_format.
+# tqdm.std always respects bar_format and renders text bars correctly.
+from tqdm.std import tqdm
 
 from .dataset import build_dataloader, load_yaml
 from .losses import build_loss_fn
@@ -550,12 +556,14 @@ class Trainer:
         }
         num_batches = 0
 
-        # Keras-style progress bar. We MUST pass `total=` because the loader
-        # is an IterableDataset and tqdm cannot infer it (without it the bar
-        # cannot animate and the ETA is missing).
+        # Keras-style progress bar.
+        # - total= is required for an IterableDataset (tqdm cannot infer length).
+        # - explicit ncols + ascii bar chars guarantee a renderable bar in the
+        #   Colab subprocess terminal (dynamic_ncols sometimes detects 0 width
+        #   and silently drops the bar).
         bar_format = (
             "  [Train {desc}] "
-            "{bar:25} "
+            "{bar} "
             "{n_fmt}/{total_fmt} "
             "[{elapsed}<{remaining} • {rate_fmt}]"
             "{postfix}"
@@ -567,8 +575,9 @@ class Trainer:
             bar_format=bar_format,
             ascii=" ▏▎▍▌▋▊▉█",
             leave=False,
-            dynamic_ncols=True,
+            ncols=110,
             mininterval=0.2,
+            file=sys.stdout,
         )
 
         for batch in pbar:
@@ -671,7 +680,7 @@ class Trainer:
 
         bar_format = (
             "    [Val {desc}] "
-            "{bar:25} "
+            "{bar} "
             "{n_fmt}/{total_fmt} "
             "[{elapsed}<{remaining}]"
             "{postfix}"
@@ -683,8 +692,9 @@ class Trainer:
             bar_format=bar_format,
             ascii=" ▏▎▍▌▋▊▉█",
             leave=False,
-            dynamic_ncols=True,
+            ncols=110,
             mininterval=0.2,
+            file=sys.stdout,
         )
 
         for batch in pbar:
