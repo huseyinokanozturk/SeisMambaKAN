@@ -280,6 +280,14 @@ class Trainer:
         # notebook cells render ANSI escapes correctly.
         self.console = Console()
 
+        # --- Val steps/epoch (Phase 2.6) ---
+        # Without an explicit `total` tqdm cannot draw an animated bar on an
+        # IterableDataset (it shows "N/?"). Estimate the val count too so both
+        # train and val bars animate.
+        self.val_steps_per_epoch: int | None = estimate_steps_per_epoch(
+            self.val_loader, self.main_cfg, self.paths_cfg, split="val"
+        )
+
         # Summary writer for TensorBoard (events.out.tfevents)
         self.writer = SummaryWriter(log_dir=str(self.exp_dir))
 
@@ -383,13 +391,26 @@ class Trainer:
         Print a rich-styled message to the console and write its plain-text
         version to the log files. This is the preferred path for end-user
         epoch summaries / status lines.
+
+        soft_wrap=True prevents rich from wrapping our pre-formatted lines
+        at the (often mis-detected) console width.
         """
-        self.console.print(rich_msg)
+        self.console.print(rich_msg, soft_wrap=True)
         plain = Text.from_markup(rich_msg).plain
         self._log_file.write(plain + "\n")
         self._log_file.flush()
         if self._mirror_log_file is not None:
             self._mirror_log_file.write(plain + "\n")
+            self._mirror_log_file.flush()
+
+    def _log_to_file(self, message: str) -> None:
+        """Write a plain-text line ONLY to the log file (and Drive mirror).
+        Use for verbose receipts (checkpoint paths, etc.) that we want
+        grep-able in logs.txt but that would clutter the live console."""
+        self._log_file.write(message + "\n")
+        self._log_file.flush()
+        if self._mirror_log_file is not None:
+            self._mirror_log_file.write(message + "\n")
             self._mirror_log_file.flush()
 
     def _print_setup_panel(self) -> None:
@@ -440,24 +461,34 @@ class Trainer:
         eta: float,
         is_best: bool,
     ) -> None:
-        """Pretty epoch summary line (logged both to console and file)."""
+        """
+        Pretty epoch summary block (3 lines: header, train, val).
+        Multi-line keeps each row narrow enough to survive Colab cell
+        wrapping; single-line variants got cut mid-label.
+        """
         marker = "[bold green]✓ best[/]" if is_best else "       "
-        line = (
+        header = (
             f"[bold]Epoch {epoch:>3}/{self.total_epochs}[/]  {marker}  "
-            f"[cyan]train[/] "
-            f"total=[bold]{train_m['total']:.4f}[/] "
-            f"det={train_m['detection']:.4f} "
-            f"p={train_m['p']:.4f} "
-            f"s={train_m['s']:.4f}   "
-            f"[magenta]val[/] "
-            f"total=[bold]{val_m['total']:.4f}[/] "
-            f"det={val_m['detection']:.4f} "
-            f"p={val_m['p']:.4f} "
-            f"s={val_m['s']:.4f}   "
             f"[dim]lr={lr:.2e} • {self._format_seconds(epoch_time)} • "
             f"eta {self._format_seconds(eta)}[/]"
         )
-        self._log_styled(line)
+        train_line = (
+            f"  [cyan]train[/]  "
+            f"total=[bold]{train_m['total']:.4f}[/]  "
+            f"det={train_m['detection']:.4f}  "
+            f"p={train_m['p']:.4f}  "
+            f"s={train_m['s']:.4f}"
+        )
+        val_line = (
+            f"  [magenta]val  [/]  "
+            f"total=[bold]{val_m['total']:.4f}[/]  "
+            f"det={val_m['detection']:.4f}  "
+            f"p={val_m['p']:.4f}  "
+            f"s={val_m['s']:.4f}"
+        )
+        self._log_styled(header)
+        self._log_styled(train_line)
+        self._log_styled(val_line)
 
     def _print_early_stop_status(
         self,
@@ -465,25 +496,31 @@ class Trainer:
         monitor_value: float,
         prev_best: float,
     ) -> None:
-        """Compact, colored status line for early-stopping bookkeeping."""
+        """
+        Compact early-stopping status. The 'improved' case is silent because
+        the '✓ best' marker on the epoch summary already conveys it; only
+        plateau epochs print a status line with a patience bar.
+        """
         if improved:
+            # Plain-text trail for grep-friendly logs.txt; no console noise.
             delta = prev_best - monitor_value if prev_best != float("inf") else float("inf")
-            delta_str = "—" if delta == float("inf") else f"-{delta:.4f}"
-            line = (
-                f"   [green]↘ early-stop:[/] '{self.es_monitor}' improved "
-                f"[dim]{prev_best:.4f} →[/] [bold]{monitor_value:.4f}[/] "
-                f"[dim]({delta_str}, patience reset 0/{self.es_patience})[/]"
+            delta_str = "(initial)" if delta == float("inf") else f"-{delta:.4f}"
+            self._log_to_file(
+                f"[Early Stop] '{self.es_monitor}' improved "
+                f"{prev_best:.4f} -> {monitor_value:.4f} {delta_str} "
+                f"(patience reset 0/{self.es_patience})."
             )
-        else:
-            patience_n = self.es_epochs_since_improvement
-            bar = "█" * patience_n + "·" * max(0, self.es_patience - patience_n)
-            warn = "[yellow]" if patience_n < self.es_patience else "[red]"
-            line = (
-                f"   {warn}↗ early-stop:[/] no improvement on "
-                f"'{self.es_monitor}' "
-                f"[dim](best={self.es_best_value:.4f})[/]  "
-                f"{warn}{bar}[/] [dim]{patience_n}/{self.es_patience}[/]"
-            )
+            return
+
+        patience_n = self.es_epochs_since_improvement
+        bar = "█" * patience_n + "·" * max(0, self.es_patience - patience_n)
+        color = "[yellow]" if patience_n < self.es_patience else "[red]"
+        line = (
+            f"  {color}⏳ patience {patience_n}/{self.es_patience}[/]  "
+            f"[dim]'{self.es_monitor}' no improvement "
+            f"(best={self.es_best_value:.4f})[/]  "
+            f"{color}{bar}[/]"
+        )
         self._log_styled(line)
 
     def _print_early_stop_triggered(self, epoch: int) -> None:
@@ -513,21 +550,25 @@ class Trainer:
         }
         num_batches = 0
 
-        # Keras-style progress bar: epoch label + bar + n/total + elapsed/remaining + postfix metrics.
+        # Keras-style progress bar. We MUST pass `total=` because the loader
+        # is an IterableDataset and tqdm cannot infer it (without it the bar
+        # cannot animate and the ETA is missing).
         bar_format = (
             "  [Train {desc}] "
-            "{bar:28} "
+            "{bar:25} "
             "{n_fmt}/{total_fmt} "
             "[{elapsed}<{remaining} • {rate_fmt}]"
             "{postfix}"
         )
         pbar = tqdm(
             self.train_loader,
+            total=self.steps_per_epoch,
             desc=f"{epoch:>3}/{self.total_epochs}",
             bar_format=bar_format,
             ascii=" ▏▎▍▌▋▊▉█",
             leave=False,
             dynamic_ncols=True,
+            mininterval=0.2,
         )
 
         for batch in pbar:
@@ -630,18 +671,20 @@ class Trainer:
 
         bar_format = (
             "    [Val {desc}] "
-            "{bar:28} "
+            "{bar:25} "
             "{n_fmt}/{total_fmt} "
             "[{elapsed}<{remaining}]"
             "{postfix}"
         )
         pbar = tqdm(
             self.val_loader,
+            total=self.val_steps_per_epoch,
             desc=f"{epoch:>3}/{self.total_epochs}",
             bar_format=bar_format,
             ascii=" ▏▎▍▌▋▊▉█",
             leave=False,
             dynamic_ncols=True,
+            mininterval=0.2,
         )
 
         for batch in pbar:
@@ -746,16 +789,16 @@ class Trainer:
     def fit(self) -> None:
         num_epochs = self.total_epochs
 
-        # Pretty setup panel (also written to logs.txt as plain text via the
-        # individual _log calls below for backward compat).
+        # Pretty setup panel for the console.
         self._print_setup_panel()
-        # Plain mirror to file so logs.txt still tells the full story without ANSI.
-        self._log(f"Starting training for {num_epochs} epochs.")
-        self._log(f"Experiment directory: {self.exp_dir}")
+        # Same info goes to logs.txt as plain text (so grep / replay still works)
+        # but we do NOT print it again to the console — the panel already shows it.
+        self._log_to_file(f"Starting training for {num_epochs} epochs.")
+        self._log_to_file(f"Experiment directory: {self.exp_dir}")
         if self.mirror_exp_dir is not None:
-            self._log(f"Mirror experiment directory: {self.mirror_exp_dir}")
-        self._log(f"Device: {self.device.type}, AMP: {self.use_amp}")
-        self._log(
+            self._log_to_file(f"Mirror experiment directory: {self.mirror_exp_dir}")
+        self._log_to_file(f"Device: {self.device.type}, AMP: {self.use_amp}")
+        self._log_to_file(
             f"Steps per epoch: {self.steps_per_epoch}, total steps: {self.total_steps}"
             if self.steps_per_epoch is not None
             else "Steps per epoch: unknown (IterableDataset)."
@@ -799,10 +842,10 @@ class Trainer:
             # Update best_val_loss now; the summary line already reflects is_best.
             if is_best:
                 self.best_val_loss = current_val
-                # Plain-text trail for logs.txt (useful when grepping the file).
+                # Verbose receipt only to logs.txt; console already shows "✓ best".
                 ck = self.ckpt_dir / f"checkpoint_epoch_{epoch:03d}.pth"
                 bm = self.exp_dir / "best_model.pth"
-                self._log(
+                self._log_to_file(
                     f"[Epoch {epoch:03d}] New best val_total={current_val:.4f}. "
                     f"ckpt={ck} best_model={bm}"
                 )
