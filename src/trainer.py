@@ -17,6 +17,13 @@ from .losses import build_loss_fn
 from .models.network import SeisMambaKAN
 from .utils import apply_dotted_overrides
 
+# Rich console for colored / structured terminal output (Phase 2.6).
+# File logs (logs.txt + Drive mirror) remain plain text; rich is only for stdout.
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+
 
 # =============================================================================
 # Utilities
@@ -268,6 +275,11 @@ class Trainer:
         self.es_best_value: float = float("inf")
         self.es_epochs_since_improvement: int = 0
 
+        # --- Rich console for pretty terminal output (Phase 2.6) ---
+        # File logs stay plain text; console renders with ANSI styling. Colab
+        # notebook cells render ANSI escapes correctly.
+        self.console = Console()
+
         # Summary writer for TensorBoard (events.out.tfevents)
         self.writer = SummaryWriter(log_dir=str(self.exp_dir))
 
@@ -356,7 +368,7 @@ class Trainer:
         return out
 
     def _log(self, message: str) -> None:
-        """Append a message to logs.txt (and mirror, if any) and print it."""
+        """Append a message to logs.txt (and mirror, if any) and print it plain."""
         print(message)
         # Local log
         self._log_file.write(message + "\n")
@@ -365,6 +377,124 @@ class Trainer:
         if self._mirror_log_file is not None:
             self._mirror_log_file.write(message + "\n")
             self._mirror_log_file.flush()
+
+    def _log_styled(self, rich_msg: str) -> None:
+        """
+        Print a rich-styled message to the console and write its plain-text
+        version to the log files. This is the preferred path for end-user
+        epoch summaries / status lines.
+        """
+        self.console.print(rich_msg)
+        plain = Text.from_markup(rich_msg).plain
+        self._log_file.write(plain + "\n")
+        self._log_file.flush()
+        if self._mirror_log_file is not None:
+            self._mirror_log_file.write(plain + "\n")
+            self._mirror_log_file.flush()
+
+    def _print_setup_panel(self) -> None:
+        """Print a one-shot startup banner summarizing the training setup."""
+        t = Table.grid(padding=(0, 1))
+        t.add_column(style="dim", justify="right")
+        t.add_column()
+        t.add_row("Experiment", f"[bold]{self.exp_dir.name}[/]  [dim]({self.exp_dir})[/]")
+        if self.mirror_exp_dir is not None:
+            t.add_row("Drive mirror", str(self.mirror_exp_dir))
+        t.add_row("Device", f"{self.device.type}")
+        t.add_row("Epochs", str(self.total_epochs))
+        if self.steps_per_epoch is not None:
+            t.add_row("Steps/epoch", str(self.steps_per_epoch))
+            t.add_row("Total steps", str(self.total_steps))
+        else:
+            t.add_row("Steps/epoch", "[yellow]unknown (IterableDataset)[/]")
+        t.add_row("Batch size", str(self.train_cfg.get("batch_size", "?")))
+        t.add_row("LR (peak)", f"{self.train_cfg.get('learning_rate', '?')}")
+        t.add_row("Scheduler", type(self.scheduler).__name__ if self.scheduler else "[dim]none[/]")
+        t.add_row("Grad clip", f"{self.grad_clip_max_norm:.2f}" if self.grad_clip_max_norm > 0 else "[dim]none[/]")
+        t.add_row("AMP", "[green]on[/]" if self.use_amp else "[dim]off[/]")
+        if self.es_enabled:
+            t.add_row(
+                "Early stop",
+                f"patience={self.es_patience} monitor=[cyan]{self.es_monitor}[/] "
+                f"min_delta={self.es_min_delta}",
+            )
+        else:
+            t.add_row("Early stop", "[dim]disabled[/]")
+
+        self.console.print(
+            Panel(
+                t,
+                title="[bold cyan]SeisMambaKAN — training[/]",
+                border_style="cyan",
+                expand=False,
+            )
+        )
+
+    def _print_epoch_summary(
+        self,
+        epoch: int,
+        train_m: Dict[str, float],
+        val_m: Dict[str, float],
+        lr: float,
+        epoch_time: float,
+        eta: float,
+        is_best: bool,
+    ) -> None:
+        """Pretty epoch summary line (logged both to console and file)."""
+        marker = "[bold green]✓ best[/]" if is_best else "       "
+        line = (
+            f"[bold]Epoch {epoch:>3}/{self.total_epochs}[/]  {marker}  "
+            f"[cyan]train[/] "
+            f"total=[bold]{train_m['total']:.4f}[/] "
+            f"det={train_m['detection']:.4f} "
+            f"p={train_m['p']:.4f} "
+            f"s={train_m['s']:.4f}   "
+            f"[magenta]val[/] "
+            f"total=[bold]{val_m['total']:.4f}[/] "
+            f"det={val_m['detection']:.4f} "
+            f"p={val_m['p']:.4f} "
+            f"s={val_m['s']:.4f}   "
+            f"[dim]lr={lr:.2e} • {self._format_seconds(epoch_time)} • "
+            f"eta {self._format_seconds(eta)}[/]"
+        )
+        self._log_styled(line)
+
+    def _print_early_stop_status(
+        self,
+        improved: bool,
+        monitor_value: float,
+        prev_best: float,
+    ) -> None:
+        """Compact, colored status line for early-stopping bookkeeping."""
+        if improved:
+            delta = prev_best - monitor_value if prev_best != float("inf") else float("inf")
+            delta_str = "—" if delta == float("inf") else f"-{delta:.4f}"
+            line = (
+                f"   [green]↘ early-stop:[/] '{self.es_monitor}' improved "
+                f"[dim]{prev_best:.4f} →[/] [bold]{monitor_value:.4f}[/] "
+                f"[dim]({delta_str}, patience reset 0/{self.es_patience})[/]"
+            )
+        else:
+            patience_n = self.es_epochs_since_improvement
+            bar = "█" * patience_n + "·" * max(0, self.es_patience - patience_n)
+            warn = "[yellow]" if patience_n < self.es_patience else "[red]"
+            line = (
+                f"   {warn}↗ early-stop:[/] no improvement on "
+                f"'{self.es_monitor}' "
+                f"[dim](best={self.es_best_value:.4f})[/]  "
+                f"{warn}{bar}[/] [dim]{patience_n}/{self.es_patience}[/]"
+            )
+        self._log_styled(line)
+
+    def _print_early_stop_triggered(self, epoch: int) -> None:
+        """Loud banner when training stops because of early-stopping."""
+        msg = (
+            f"[bold red]🛑 Early stop triggered[/] at epoch [bold]{epoch}[/]/{self.total_epochs}. "
+            f"'{self.es_monitor}' did not improve by ≥{self.es_min_delta} "
+            f"for {self.es_patience} consecutive epochs "
+            f"(best={self.es_best_value:.4f})."
+        )
+        self._log_styled(msg)
 
     # ------------------------------------------------------------------
     # Training / validation loop
@@ -383,7 +513,22 @@ class Trainer:
         }
         num_batches = 0
 
-        pbar = tqdm(self.train_loader, desc=f"[Epoch {epoch}] Train", leave=False)
+        # Keras-style progress bar: epoch label + bar + n/total + elapsed/remaining + postfix metrics.
+        bar_format = (
+            "  [Train {desc}] "
+            "{bar:28} "
+            "{n_fmt}/{total_fmt} "
+            "[{elapsed}<{remaining} • {rate_fmt}]"
+            "{postfix}"
+        )
+        pbar = tqdm(
+            self.train_loader,
+            desc=f"{epoch:>3}/{self.total_epochs}",
+            bar_format=bar_format,
+            ascii=" ▏▎▍▌▋▊▉█",
+            leave=False,
+            dynamic_ncols=True,
+        )
 
         for batch in pbar:
             x, labels = batch  # x: (B, T, C), labels: dict
@@ -483,7 +628,21 @@ class Trainer:
         }
         num_batches = 0
 
-        pbar = tqdm(self.val_loader, desc=f"[Epoch {epoch}] Val", leave=False)
+        bar_format = (
+            "    [Val {desc}] "
+            "{bar:28} "
+            "{n_fmt}/{total_fmt} "
+            "[{elapsed}<{remaining}]"
+            "{postfix}"
+        )
+        pbar = tqdm(
+            self.val_loader,
+            desc=f"{epoch:>3}/{self.total_epochs}",
+            bar_format=bar_format,
+            ascii=" ▏▎▍▌▋▊▉█",
+            leave=False,
+            dynamic_ncols=True,
+        )
 
         for batch in pbar:
             x, labels = batch
@@ -587,23 +746,20 @@ class Trainer:
     def fit(self) -> None:
         num_epochs = self.total_epochs
 
+        # Pretty setup panel (also written to logs.txt as plain text via the
+        # individual _log calls below for backward compat).
+        self._print_setup_panel()
+        # Plain mirror to file so logs.txt still tells the full story without ANSI.
         self._log(f"Starting training for {num_epochs} epochs.")
         self._log(f"Experiment directory: {self.exp_dir}")
         if self.mirror_exp_dir is not None:
             self._log(f"Mirror experiment directory: {self.mirror_exp_dir}")
         self._log(f"Device: {self.device.type}, AMP: {self.use_amp}")
-        self._log(f"use_channels_last (4D only): {self.channels_last}")
-
-        if self.steps_per_epoch is not None:
-            self._log(
-                f"Steps per epoch: {self.steps_per_epoch}, "
-                f"total steps: {self.total_steps}"
-            )
-        else:
-            self._log(
-                "Steps per epoch: unknown (IterableDataset), "
-                "ETA based on average epoch time only."
-            )
+        self._log(
+            f"Steps per epoch: {self.steps_per_epoch}, total steps: {self.total_steps}"
+            if self.steps_per_epoch is not None
+            else "Steps per epoch: unknown (IterableDataset)."
+        )
 
         # Global timer for ETA estimation
         start_time = time.time()
@@ -622,79 +778,54 @@ class Trainer:
             eta = avg_epoch_time * remaining_epochs
 
             current_lr = self.optimizer.param_groups[0]["lr"]
-            log_msg = (
-                f"[Epoch {epoch:03d}] "
-                f"Train total={train_metrics['total']:.4f}, "
-                f"Val total={val_metrics['total']:.4f}, "
-                f"Val det={val_metrics['detection']:.4f}, "
-                f"Val p={val_metrics['p']:.4f}, "
-                f"Val s={val_metrics['s']:.4f} | "
-                f"lr={current_lr:.2e} | "
-                f"epoch_time={self._format_seconds(epoch_time)} | "
-                f"elapsed={self._format_seconds(elapsed)} | "
-                f"eta={self._format_seconds(eta)}"
-            )
             self.writer.add_scalar("train/lr", current_lr, epoch)
-            self._log(log_msg)
 
+            # Determine "is_best" up-front so the summary line can show ✓.
             current_val = val_metrics["total"]
             is_best = current_val < self.best_val_loss
-            if is_best:
-                prev_best = self.best_val_loss
-                self.best_val_loss = current_val
 
-                # Log best checkpoint info
-                best_ckpt_path = self.ckpt_dir / f"checkpoint_epoch_{epoch:03d}.pth"
-                best_model_path = self.exp_dir / "best_model.pth"
-                msg = (
-                    f"[Epoch {epoch:03d}] New best val_total={current_val:.4f} "
-                    f"(prev={prev_best:.4f}). "
-                    f"Checkpoint saved to {best_ckpt_path}, best_model to {best_model_path}"
+            # Pretty summary
+            self._print_epoch_summary(
+                epoch=epoch,
+                train_m=train_metrics,
+                val_m=val_metrics,
+                lr=current_lr,
+                epoch_time=epoch_time,
+                eta=eta,
+                is_best=is_best,
+            )
+
+            current_val = val_metrics["total"]
+            # Update best_val_loss now; the summary line already reflects is_best.
+            if is_best:
+                self.best_val_loss = current_val
+                # Plain-text trail for logs.txt (useful when grepping the file).
+                ck = self.ckpt_dir / f"checkpoint_epoch_{epoch:03d}.pth"
+                bm = self.exp_dir / "best_model.pth"
+                self._log(
+                    f"[Epoch {epoch:03d}] New best val_total={current_val:.4f}. "
+                    f"ckpt={ck} best_model={bm}"
                 )
-                if self.mirror_ckpt_dir is not None and self.mirror_exp_dir is not None:
-                    mirror_best_ckpt_path = (
-                        self.mirror_ckpt_dir / f"checkpoint_epoch_{epoch:03d}.pth"
-                    )
-                    mirror_best_model_path = self.mirror_exp_dir / "best_model.pth"
-                    msg += (
-                        f" (mirrored to {mirror_best_ckpt_path} and {mirror_best_model_path})"
-                    )
-                self._log(msg)
 
             self._save_checkpoint(epoch, val_metrics, is_best=is_best)
 
             # ----- Early stopping (Phase 2.5) -----
             if self.es_enabled:
-                # Look up the monitored metric; fall back to val_total if the
-                # requested key is not present in val_metrics.
                 monitor_value = float(
                     val_metrics.get(self.es_monitor, val_metrics["total"])
                 )
-
-                if monitor_value < (self.es_best_value - self.es_min_delta):
-                    # Improvement (smaller than best by at least min_delta).
-                    prev = self.es_best_value
+                improved = monitor_value < (self.es_best_value - self.es_min_delta)
+                prev_best = self.es_best_value
+                if improved:
                     self.es_best_value = monitor_value
                     self.es_epochs_since_improvement = 0
-                    self._log(
-                        f"[Early Stop] '{self.es_monitor}' improved "
-                        f"{prev:.4f} -> {monitor_value:.4f} (delta>={self.es_min_delta})."
-                    )
                 else:
                     self.es_epochs_since_improvement += 1
-                    self._log(
-                        f"[Early Stop] '{self.es_monitor}' no improvement "
-                        f"(value={monitor_value:.4f}, best={self.es_best_value:.4f}, "
-                        f"patience {self.es_epochs_since_improvement}/{self.es_patience})."
-                    )
+
+                self._print_early_stop_status(improved, monitor_value, prev_best)
 
                 if self.es_epochs_since_improvement >= self.es_patience:
-                    self._log(
-                        f"[Early Stop] Triggered at epoch {epoch}/{num_epochs}: "
-                        f"'{self.es_monitor}' has not improved by min_delta="
-                        f"{self.es_min_delta} for {self.es_patience} consecutive "
-                        f"epochs (best={self.es_best_value:.4f})."
-                    )
+                    self._print_early_stop_triggered(epoch)
                     break
 
         # Close resources
