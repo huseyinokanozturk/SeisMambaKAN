@@ -125,10 +125,11 @@ def _cache_predictions(
                 elapsed = time.time() - t0
                 print(f"  cached {n_samples} samples in {elapsed:.1f}s")
 
+    # Model heads return (B, T) — already 2D, no channel dim to squeeze.
     cache = {
-        "det_pred": np.concatenate(det_preds, axis=0).squeeze(1),  # (N, T)
-        "p_pred": np.concatenate(p_preds, axis=0).squeeze(1),
-        "s_pred": np.concatenate(s_preds, axis=0).squeeze(1),
+        "det_pred": np.concatenate(det_preds, axis=0),  # (N, T)
+        "p_pred": np.concatenate(p_preds, axis=0),
+        "s_pred": np.concatenate(s_preds, axis=0),
         "gt_event": np.asarray(gt_event, dtype=np.int8),
         "p_idx_true": np.asarray(p_idx_true, dtype=np.int32),
         "s_idx_true": np.asarray(s_idx_true, dtype=np.int32),

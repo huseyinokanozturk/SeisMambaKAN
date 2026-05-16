@@ -331,12 +331,12 @@ metrics:
     # detection-based search window.
     det_window_threshold: 0.6
 
-    # Hard cap on the detection-window half-width (seconds either side of
-    # the detection peak inside the dominant component). Prevents an
-    # over-extended single detection region from spreading the picker
-    # search across tens of seconds. STEAD P-S gaps are <=35s so 10s
-    # gives plenty of room around the actual phase center.
-    max_window_half_sec: 10.0
+    # Soft cap on detection-window half-width. Only kicks in when the
+    # dominant detection component is *wider* than 2 * max_window_half_sec
+    # (pathological over-detection). Normal components are kept verbatim.
+    # STEAD P-S gaps go up to 35s, so 25s either side (=50s total) leaves
+    # plenty of room and never amputates the real P or S position.
+    max_window_half_sec: 25.0
 
     # Parabolic 3-point fit around the picker argmax. Pushes the median
     # error below the 1-sample (10ms @ 100Hz) quantization floor.

@@ -215,27 +215,31 @@ def _dominant_detection_window(
     pad_samples: int,
 ) -> Tuple[int, int]:
     """
-    Phase-5 picker fix.
+    Phase-5 picker fix (revised).
 
     Returns (start, end) sample indices for the phase search window. Two
-    failure modes the previous union-of-above-threshold approach allowed,
-    fixed here:
+    failure modes the original union-of-above-threshold approach allowed,
+    handled here:
 
-      (1) Spurious detection blips outside the real event (e.g. a 0.3s
-          high-confidence bump in the last second of the window) used to
-          extend the search range over the entire trace. Picker then
-          argmax'd inside that blip and produced 50+ s phase errors.
-          Fix: pick the single connected component (run of above-threshold
-          timesteps) with the highest score = length × max_amp.
+      (1) Spurious detection blips outside the real event used to extend
+          the search range over the entire trace; the picker then
+          argmax'd inside the blip and produced 30-50 s phase errors.
+          Fix: select a single connected component (run of above-
+          threshold timesteps), scored by integrated detection mass —
+          sum(det[component]). Sum is more robust than length × max
+          against high-amplitude noise spikes that happen to peak above
+          a real but weaker event.
 
-      (2) Over-extended single components (model unsure → detection stays
-          above 0.6 for 40 s) caused the picker to roam far from the
-          actual event center. Fix: anchor on the detection peak inside
-          the chosen component and cap the window to ±max_half_sec.
-
-    Together these handle the worst-case plots from epoch-5 eval where
-    the model's Gaussian peaks were correct but the picker chose a
-    spurious neighborhood instead.
+      (2) Over-extended single components (model leaves detection above
+          threshold for tens of seconds) caused the picker to roam far
+          from the actual event center. Fix: only when a component is
+          pathologically wide (> 2 * max_half_sec) do we anchor on the
+          detection peak and clip to ±max_half_sec. Normal-width
+          components are kept verbatim — clipping a healthy component
+          would amputate P or S in long-PS-gap events (STEAD allows up
+          to 35 s between phases, so an aggressive ±10 s clip routinely
+          excluded the real P/S position; the first attempt of this fix
+          dropped P pick_rate from 0.91 to 0.79).
     """
     T = int(det.shape[0])
     mask = det >= threshold
@@ -248,25 +252,36 @@ def _dominant_detection_window(
     starts = np.where(diff == 1)[0]
     ends = np.where(diff == -1)[0]  # exclusive end indices into det
 
-    # length × max_amp scoring: long high-confidence regions beat short
-    # noisy blips even when the latter happen to peak slightly higher.
+    # Score = integrated detection mass. Length × max biases toward short
+    # high-amplitude noise spikes; sum favours sustained activity which
+    # is the actual signature of a real event.
     best_idx = 0
     best_score = -1.0
     for i, (s, e) in enumerate(zip(starts, ends)):
-        score = float(e - s) * float(det[s:e].max())
+        score = float(det[s:e].sum())
         if score > best_score:
             best_score = score
             best_idx = i
     comp_start = int(starts[best_idx])
     comp_end = int(ends[best_idx]) - 1
 
-    # Anchor on the detection peak inside the chosen component and bound
-    # the window. half_width caps blow-up when the model leaves a single
-    # component above threshold for tens of seconds.
-    local_peak = comp_start + int(np.argmax(det[comp_start : comp_end + 1]))
-    half_width = int(round(max_half_sec * sample_rate))
-    start = max(0, max(comp_start, local_peak - half_width) - pad_samples)
-    end = min(T - 1, min(comp_end, local_peak + half_width) + pad_samples)
+    # Only clip the window when the chosen component is wider than a
+    # plausible event (2 * max_half_sec). Most events fit within this
+    # bound naturally; aggressive clipping in the normal case removes
+    # legitimate P or S positions and tanks pick_rate.
+    comp_width = comp_end - comp_start + 1
+    max_width = int(round(2.0 * max_half_sec * sample_rate))
+    if comp_width > max_width:
+        local_peak = comp_start + int(np.argmax(det[comp_start : comp_end + 1]))
+        half_width = int(round(max_half_sec * sample_rate))
+        start_clip = max(comp_start, local_peak - half_width)
+        end_clip = min(comp_end, local_peak + half_width)
+    else:
+        start_clip = comp_start
+        end_clip = comp_end
+
+    start = max(0, start_clip - pad_samples)
+    end = min(T - 1, end_clip + pad_samples)
     return start, end
 
 
