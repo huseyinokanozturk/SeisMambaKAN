@@ -320,18 +320,35 @@ metrics:
   # Phase Picker Settings (P/S Estimation)
   # ============================================================================
   picker:
-    # If true, restrict P/S search region to the part of the trace where
-    # detection probabilities exceed det_window_threshold.
+    # If true, restrict P/S search region to the dominant connected
+    # detection region (Phase 5 fix). Without this the picker used to
+    # take the union of *all* above-threshold timesteps and routinely
+    # argmax'd inside spurious blips, producing 30-50s phase errors on
+    # the epoch-5 worst cases.
     use_detection_window: true
 
     # Minimum detection probability for a time sample to be included in the
     # detection-based search window.
     det_window_threshold: 0.6
 
+    # Hard cap on the detection-window half-width (seconds either side of
+    # the detection peak inside the dominant component). Prevents an
+    # over-extended single detection region from spreading the picker
+    # search across tens of seconds. STEAD P-S gaps are <=35s so 10s
+    # gives plenty of room around the actual phase center.
+    max_window_half_sec: 10.0
+
+    # Parabolic 3-point fit around the picker argmax. Pushes the median
+    # error below the 1-sample (10ms @ 100Hz) quantization floor.
+    parabolic_refine: true
+
     # Minimum required Gaussian amplitude for accepting a predicted P or S pick.
     # If the maximum Gaussian value is below this threshold, the phase is rejected.
-    p_amp_threshold: 0.25
-    s_amp_threshold: 0.20
+    # P lowered to 0.15 (Phase 5): epoch-5 eval showed P pick_rate 0.91 vs
+    # S 0.99 — model's P Gaussian amplitude is consistently weaker, so 0.25
+    # rejected ~9% of valid P picks. 0.15 still well above noise floor.
+    p_amp_threshold: 0.15
+    s_amp_threshold: 0.15
 
     # Optional constraints for stabilizing phase picking.
     # Minimum allowed P–S time separation in seconds.

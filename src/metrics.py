@@ -207,6 +207,92 @@ def _extract_label_curves(
 # =============================================================================
 
 
+def _dominant_detection_window(
+    det: np.ndarray,
+    threshold: float,
+    sample_rate: float,
+    max_half_sec: float,
+    pad_samples: int,
+) -> Tuple[int, int]:
+    """
+    Phase-5 picker fix.
+
+    Returns (start, end) sample indices for the phase search window. Two
+    failure modes the previous union-of-above-threshold approach allowed,
+    fixed here:
+
+      (1) Spurious detection blips outside the real event (e.g. a 0.3s
+          high-confidence bump in the last second of the window) used to
+          extend the search range over the entire trace. Picker then
+          argmax'd inside that blip and produced 50+ s phase errors.
+          Fix: pick the single connected component (run of above-threshold
+          timesteps) with the highest score = length × max_amp.
+
+      (2) Over-extended single components (model unsure → detection stays
+          above 0.6 for 40 s) caused the picker to roam far from the
+          actual event center. Fix: anchor on the detection peak inside
+          the chosen component and cap the window to ±max_half_sec.
+
+    Together these handle the worst-case plots from epoch-5 eval where
+    the model's Gaussian peaks were correct but the picker chose a
+    spurious neighborhood instead.
+    """
+    T = int(det.shape[0])
+    mask = det >= threshold
+    if not bool(np.any(mask)):
+        return 0, T - 1
+
+    # Connected components via mask transitions on a zero-padded array.
+    padded = np.concatenate([[0], mask.astype(np.int8), [0]])
+    diff = np.diff(padded)
+    starts = np.where(diff == 1)[0]
+    ends = np.where(diff == -1)[0]  # exclusive end indices into det
+
+    # length × max_amp scoring: long high-confidence regions beat short
+    # noisy blips even when the latter happen to peak slightly higher.
+    best_idx = 0
+    best_score = -1.0
+    for i, (s, e) in enumerate(zip(starts, ends)):
+        score = float(e - s) * float(det[s:e].max())
+        if score > best_score:
+            best_score = score
+            best_idx = i
+    comp_start = int(starts[best_idx])
+    comp_end = int(ends[best_idx]) - 1
+
+    # Anchor on the detection peak inside the chosen component and bound
+    # the window. half_width caps blow-up when the model leaves a single
+    # component above threshold for tens of seconds.
+    local_peak = comp_start + int(np.argmax(det[comp_start : comp_end + 1]))
+    half_width = int(round(max_half_sec * sample_rate))
+    start = max(0, max(comp_start, local_peak - half_width) - pad_samples)
+    end = min(T - 1, min(comp_end, local_peak + half_width) + pad_samples)
+    return start, end
+
+
+def _parabolic_subsample_offset(arr: np.ndarray, idx: int) -> float:
+    """
+    3-point parabolic fit around `arr[idx]` (assumed local max). Returns a
+    sub-sample offset in (-0.5, 0.5]; add this to `idx` to get a continuous
+    peak position. Pushes the picker below the 1-sample (10 ms @ 100 Hz)
+    quantization floor → median P/S errors can drop from 10 ms to 2-5 ms.
+    """
+    if idx <= 0 or idx >= len(arr) - 1:
+        return 0.0
+    y_prev = float(arr[idx - 1])
+    y_curr = float(arr[idx])
+    y_next = float(arr[idx + 1])
+    denom = y_prev - 2.0 * y_curr + y_next
+    if abs(denom) < 1e-12:
+        return 0.0
+    offset = 0.5 * (y_prev - y_next) / denom
+    if offset < -0.5:
+        offset = -0.5
+    elif offset > 0.5:
+        offset = 0.5
+    return offset
+
+
 def pick_phases(
     det_curve: np.ndarray | torch.Tensor,
     p_curve: np.ndarray | torch.Tensor,
@@ -233,21 +319,23 @@ def pick_phases(
     s_amp_threshold = float(picker_cfg.get("s_amp_threshold", 0.1))
     min_ps_gap_sec = float(picker_cfg.get("min_ps_gap_sec", 0.0))
     max_search_pad_sec = float(picker_cfg.get("max_search_pad_sec", 0.0))
+    max_window_half_sec = float(picker_cfg.get("max_window_half_sec", 10.0))
+    use_parabolic_refine = bool(picker_cfg.get("parabolic_refine", True))
 
     pad_samples = int(round(max_search_pad_sec * sample_rate))
 
     det_max = float(det.max()) if T > 0 else 0.0
     has_event_pred = True
 
-    # Detection window for phase search
+    # Detection window for phase search (dominant component + bounded).
     if use_detection_window:
-        mask = det >= det_window_threshold
-        if np.any(mask):
-            idx = np.where(mask)[0]
-            start = max(int(idx[0]) - pad_samples, 0)
-            end = min(int(idx[-1]) + pad_samples, T - 1)
-        else:
-            start, end = 0, T - 1
+        start, end = _dominant_detection_window(
+            det,
+            threshold=det_window_threshold,
+            sample_rate=sample_rate,
+            max_half_sec=max_window_half_sec,
+            pad_samples=pad_samples,
+        )
     else:
         start, end = 0, T - 1
 
@@ -265,7 +353,11 @@ def pick_phases(
         if p_amp_candidate >= p_amp_threshold:
             p_idx = p_idx_candidate
             p_amp = p_amp_candidate
-            p_time = p_idx / sample_rate
+            if use_parabolic_refine:
+                offset = _parabolic_subsample_offset(p, p_idx_candidate)
+                p_time = (p_idx_candidate + offset) / sample_rate
+            else:
+                p_time = p_idx / sample_rate
 
     # S-phase pick: physically S must arrive after P. Constrain the S search
     # to [p_idx + min_gap_samples, end]. Without this guard the picker
@@ -289,7 +381,11 @@ def pick_phases(
         if s_amp_candidate >= s_amp_threshold:
             s_idx = s_idx_candidate
             s_amp = s_amp_candidate
-            s_time = s_idx / sample_rate
+            if use_parabolic_refine:
+                offset = _parabolic_subsample_offset(s, s_idx_candidate)
+                s_time = (s_idx_candidate + offset) / sample_rate
+            else:
+                s_time = s_idx / sample_rate
 
     # ps_gap_ok kept for backward compatibility; with the constraint above
     # it will be True whenever both picks exist.

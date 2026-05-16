@@ -226,6 +226,9 @@ data/processed/
 # Experiments: logs, checkpoints, tensorboard, temp configs
 experiments/
 
+# Eval / inference outputs (metrics JSON, plots, threshold sweeps)
+results/
+
 # Saved models
 saved_models/
 

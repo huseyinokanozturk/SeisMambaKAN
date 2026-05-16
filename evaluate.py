@@ -49,6 +49,8 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     g.add_argument("--ckpt", type=str, default=None, help="Explicit checkpoint path.")
     p.add_argument("--split", choices=["val", "test"], default="val")
     p.add_argument("--prefer", choices=["best", "last", "auto"], default="best")
+    p.add_argument("--data-mode", choices=["all", "sample"], default=None,
+                   help="Override data.mode from config.yaml.")
     p.add_argument("--no-drive-mirror", action="store_true",
                    help="Skip mirroring results to Drive even if mounted.")
     return p.parse_args(argv)
@@ -116,6 +118,9 @@ def main(argv: Optional[list[str]] = None) -> None:
     args = _parse_args(argv)
 
     main_cfg, model_cfg, paths_cfg = load_all_configs()
+    if args.data_mode is not None:
+        main_cfg.setdefault("data", {})["mode"] = args.data_mode
+        print(f"[Eval] data.mode override: {args.data_mode}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # ----- resolve checkpoint + exp id -------------------------------------

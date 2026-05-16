@@ -176,6 +176,8 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--no-show", action="store_true",
                    help="Do not call plt.show() (useful in headless mode).")
     p.add_argument("--no-drive-mirror", action="store_true")
+    p.add_argument("--data-mode", choices=["all", "sample"], default=None,
+                   help="Override data.mode from config.yaml.")
     return p.parse_args(argv)
 
 
@@ -211,6 +213,9 @@ def main(argv: Optional[list[str]] = None) -> None:
     # Load configs
     # ------------------------------------------------------------------
     main_cfg, model_cfg, paths_cfg = load_all_configs()
+    if args.data_mode is not None:
+        main_cfg.setdefault("data", {})["mode"] = args.data_mode
+        print(f"[INFER] data.mode override: {args.data_mode}")
 
     metrics_cfg = main_cfg.get("metrics", {})
     sample_rate = float(metrics_cfg.get("sample_rate", 100.0))

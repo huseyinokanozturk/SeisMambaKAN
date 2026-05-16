@@ -192,10 +192,15 @@ def eval(
     ckpt: Optional[str] = typer.Option(None, "--ckpt", help="Explicit checkpoint path."),
     split: str = typer.Option("val", "--split", "-s", help="val | test"),
     prefer: str = typer.Option("best", "--prefer", help="best | last | auto"),
+    data_mode: Optional[str] = typer.Option(None, "--data-mode",
+                                             help="Override data.mode (all|sample)."),
     no_drive_mirror: bool = typer.Option(False, "--no-drive-mirror"),
 ) -> None:
     if split not in ("val", "test"):
         _err("--split must be val|test")
+        raise typer.Exit(2)
+    if data_mode is not None and data_mode not in ("all", "sample"):
+        _err("--data-mode must be all|sample")
         raise typer.Exit(2)
 
     os.chdir(project_root())
@@ -205,6 +210,8 @@ def eval(
         argv += ["--exp", str(exp)]
     elif ckpt is not None:
         argv += ["--ckpt", ckpt]
+    if data_mode is not None:
+        argv += ["--data-mode", data_mode]
     if no_drive_mirror:
         argv += ["--no-drive-mirror"]
     eval_main(argv)
@@ -221,12 +228,17 @@ def infer(
     split: str = typer.Option("test", "--split", "-s"),
     index: Optional[int] = typer.Option(None, "--index", "-i"),
     prefer: str = typer.Option("best", "--prefer"),
+    data_mode: Optional[str] = typer.Option(None, "--data-mode",
+                                             help="Override data.mode (all|sample)."),
     no_save: bool = typer.Option(False, "--no-save"),
     no_show: bool = typer.Option(False, "--no-show"),
     no_drive_mirror: bool = typer.Option(False, "--no-drive-mirror"),
 ) -> None:
     if split not in ("val", "test"):
         _err("--split must be val|test")
+        raise typer.Exit(2)
+    if data_mode is not None and data_mode not in ("all", "sample"):
+        _err("--data-mode must be all|sample")
         raise typer.Exit(2)
 
     os.chdir(project_root())
@@ -238,10 +250,48 @@ def infer(
         argv += ["--ckpt", ckpt]
     if index is not None:
         argv += ["--index", str(index)]
+    if data_mode is not None:
+        argv += ["--data-mode", data_mode]
     if no_save:        argv.append("--no-save")
     if no_show:        argv.append("--no-show")
     if no_drive_mirror: argv.append("--no-drive-mirror")
     infer_main(argv)
+
+
+# =============================================================================
+# sweep
+# =============================================================================
+
+@app.command(help="Grid-search picker thresholds against val to maximise F1 + minimise P/S MAE.")
+def sweep(
+    exp: Optional[int] = typer.Option(None, "--exp"),
+    ckpt: Optional[str] = typer.Option(None, "--ckpt"),
+    split: str = typer.Option("val", "--split", "-s"),
+    data_mode: Optional[str] = typer.Option(None, "--data-mode",
+                                             help="Override data.mode (all|sample)."),
+    top_n: int = typer.Option(10, "--top-n"),
+    max_batches: Optional[int] = typer.Option(None, "--max-batches",
+                                                help="Smoke-cap on inference batches."),
+) -> None:
+    if split not in ("val", "test"):
+        _err("--split must be val|test")
+        raise typer.Exit(2)
+    if data_mode is not None and data_mode not in ("all", "sample"):
+        _err("--data-mode must be all|sample")
+        raise typer.Exit(2)
+
+    os.chdir(project_root())
+    from scripts.threshold_sweep import main as sweep_main
+    argv = ["--split", split, "--top-n", str(top_n)]
+    if exp is not None:
+        argv += ["--exp", str(exp)]
+    elif ckpt is not None:
+        argv += ["--ckpt", ckpt]
+    if data_mode is not None:
+        argv += ["--data-mode", data_mode]
+    if max_batches is not None:
+        argv += ["--max-batches", str(max_batches)]
+    sweep_main(argv)
 
 
 # =============================================================================
