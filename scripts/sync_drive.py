@@ -77,17 +77,31 @@ def _copy_tree(
         print(f"[WARN] No files under {src}")
         return 0
 
+    # Pre-create subdirs to avoid mkdir races between parallel workers.
+    for f in files:
+        (dst / f.relative_to(src)).parent.mkdir(parents=True, exist_ok=True)
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    n_workers = 8
+
+    def _copy_one(f: Path) -> None:
+        shutil.copy2(f, dst / f.relative_to(src))
+
     try:
         from tqdm.auto import tqdm
-        iterator = tqdm(files, desc=desc, unit="file")
+        pbar = tqdm(total=total, desc=desc, unit="file")
     except ImportError:
-        iterator = files
+        pbar = None
 
-    for f in iterator:
-        rel = f.relative_to(src)
-        out = dst / rel
-        out.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(f, out)
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = [pool.submit(_copy_one, f) for f in files]
+        for fut in as_completed(futures):
+            fut.result()
+            if pbar is not None:
+                pbar.update(1)
+
+    if pbar is not None:
+        pbar.close()
 
     return total
 

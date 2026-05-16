@@ -88,8 +88,10 @@ def _run_subprocess(cmd: list[str], cwd: Optional[Path] = None) -> int:
 def setup(
     data_mode: str = typer.Option("sample", "--data-mode", "-m",
                                    help="all | sample | none"),
-    refresh_data: bool = typer.Option(True, "--refresh/--no-refresh",
-                                       help="Wipe existing data dir before copying."),
+    refresh_data: bool = typer.Option(False, "--refresh/--no-refresh",
+                                       help="Wipe existing data dir before copying. "
+                                            "Default False so failed mamba/torch installs "
+                                            "don't trigger a 90GB re-pull on the next run."),
     skip_data: bool = typer.Option(False, "--skip-data"),
     skip_torch: bool = typer.Option(False, "--skip-torch"),
     skip_wheels: bool = typer.Option(False, "--skip-wheels"),

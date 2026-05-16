@@ -159,19 +159,43 @@ def copy_data(
     if total == 0:
         print(f"[WARN] No files under {src_root}")
         return
-    print(f"[INFO] Copying {total} files: {src_root} -> {dst_root}")
+
+    # Pre-create destination subdirs so parallel copies don't race on mkdir.
+    for src in files:
+        rel = src.relative_to(src_root)
+        (dst_root / rel).parent.mkdir(parents=True, exist_ok=True)
+
+    # Drive I/O is the bottleneck, not CPU. shutil.copy2 releases the GIL
+    # during the read/write loop, so threading gives a real speedup (~3-5x
+    # on Colab) without touching multiprocessing. 8 workers is a sweet
+    # spot for Drive throughput; more workers triggers throttling.
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    n_workers = 8
+    print(
+        f"[INFO] Copying {total} files: {src_root} -> {dst_root} "
+        f"({n_workers} parallel workers)"
+    )
+
+    def _copy_one(src: Path) -> int:
+        rel = src.relative_to(src_root)
+        shutil.copy2(src, dst_root / rel)
+        return src.stat().st_size
 
     try:
         from tqdm.auto import tqdm
-        iterator = tqdm(files, desc="Copying data", unit="file")
+        pbar = tqdm(total=total, desc="Copying", unit="file")
     except ImportError:
-        iterator = files
+        pbar = None
 
-    for src in iterator:
-        rel = src.relative_to(src_root)
-        dst = dst_root / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = [pool.submit(_copy_one, src) for src in files]
+        for fut in as_completed(futures):
+            fut.result()
+            if pbar is not None:
+                pbar.update(1)
+
+    if pbar is not None:
+        pbar.close()
 
     print(f"[OK] Data copy completed ({total} files).")
 
@@ -372,7 +396,7 @@ def final_checks() -> bool:
 
 def run_full_setup(
     data_mode: str = "sample",
-    refresh_data: bool = True,
+    refresh_data: bool = False,
     skip_data: bool = False,
     skip_torch: bool = False,
     skip_wheels: bool = False,
