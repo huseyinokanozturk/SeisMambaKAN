@@ -392,6 +392,9 @@ class Trainer:
         # Step/epoch counters for ETA logging
         self.total_epochs: int = int(self.train_cfg.get("epochs", 1))
 
+        # First epoch index to run. Bumped on resume by _load_resume_state.
+        self.start_epoch: int = 1
+
         # WebDataset is an IterableDataset, so len(loader) raises. Use the
         # same shard-count heuristic that main() / build_scheduler use so the
         # setup panel and the tqdm bars know the real step count.
@@ -505,7 +508,16 @@ class Trainer:
         t.add_row("Experiment", f"[bold]{self.exp_dir.name}[/]  [dim]({self.exp_dir})[/]")
         if self.mirror_exp_dir is not None:
             t.add_row("Drive mirror", str(self.mirror_exp_dir))
+        data_mode = self.main_cfg.get("data", {}).get("mode", "?")
+        mode_color = "green" if data_mode == "all" else "yellow"
+        t.add_row("Data mode", f"[{mode_color}]{data_mode}[/]")
         t.add_row("Device", f"{self.device.type}")
+        if self.start_epoch > 1:
+            t.add_row(
+                "Resume",
+                f"[cyan]from epoch {self.start_epoch - 1}[/] "
+                f"(best_val={self.best_val_loss:.4f})",
+            )
         t.add_row("Epochs", str(self.total_epochs))
         if self.steps_per_epoch is not None:
             t.add_row("Steps/epoch", str(self.steps_per_epoch))
@@ -845,6 +857,66 @@ class Trainer:
     # Checkpointing
     # ------------------------------------------------------------------
 
+    def load_resume_state(self, resume_path: Path) -> None:
+        """
+        Restore full trainer state from a `last.pth` checkpoint produced by
+        `_save_checkpoint`. Used for Colab-disconnect recovery in long
+        production runs. Call AFTER Trainer.__init__ has built model /
+        optimizer / scheduler / EMA so all targets exist.
+        """
+        if not resume_path.exists():
+            raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
+
+        ckpt = torch.load(resume_path, map_location=self.device, weights_only=False)
+
+        self.model.load_state_dict(ckpt["model_state_dict"])
+        self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+
+        sched_state = ckpt.get("scheduler_state_dict")
+        if self.scheduler is not None and sched_state is not None:
+            self.scheduler.load_state_dict(sched_state)
+
+        scaler_state = ckpt.get("scaler_state_dict")
+        if scaler_state is not None:
+            self.scaler.load_state_dict(scaler_state)
+
+        ema_shadow = ckpt.get("ema_shadow")
+        if self.ema is not None and ema_shadow is not None:
+            for k, v in ema_shadow.items():
+                if k in self.ema.shadow:
+                    self.ema.shadow[k] = v.to(self.device)
+
+        self.best_val_loss = float(ckpt.get("best_val_loss", float("inf")))
+        self.es_best_value = float(ckpt.get("es_best_value", float("inf")))
+        self.es_epochs_since_improvement = int(
+            ckpt.get("es_epochs_since_improvement", 0)
+        )
+        self.global_step = int(ckpt.get("global_step", 0))
+
+        # RNG restoration so a resumed run replays the same augmentation
+        # order it would have produced under a single uninterrupted run.
+        try:
+            if ckpt.get("rng_python") is not None:
+                random.setstate(ckpt["rng_python"])
+            if ckpt.get("rng_numpy") is not None:
+                np.random.set_state(ckpt["rng_numpy"])
+            if ckpt.get("rng_torch_cpu") is not None:
+                torch.set_rng_state(ckpt["rng_torch_cpu"])
+            if (
+                ckpt.get("rng_torch_cuda") is not None
+                and torch.cuda.is_available()
+            ):
+                torch.cuda.set_rng_state_all(ckpt["rng_torch_cuda"])
+        except Exception as e:
+            print(f"[Trainer] RNG restore failed (non-fatal): {e}")
+
+        self.start_epoch = int(ckpt.get("epoch", 0)) + 1
+        print(
+            f"[Trainer] resumed from {resume_path.name} "
+            f"@ epoch {ckpt.get('epoch')} (next epoch: {self.start_epoch}); "
+            f"best_val={self.best_val_loss:.4f}"
+        )
+
     def _save_checkpoint(
         self,
         epoch: int,
@@ -867,6 +939,26 @@ class Trainer:
             "config": self.main_cfg,
             "model_config": self.model_cfg,
             "paths_config": self.paths_cfg,
+            # --- Resume state (added for production resilience) ---
+            "scheduler_state_dict": (
+                self.scheduler.state_dict() if self.scheduler is not None else None
+            ),
+            "scaler_state_dict": self.scaler.state_dict(),
+            "ema_shadow": (
+                {k: v.detach().cpu() for k, v in self.ema.shadow.items()}
+                if self.ema is not None
+                else None
+            ),
+            "best_val_loss": self.best_val_loss,
+            "es_best_value": self.es_best_value,
+            "es_epochs_since_improvement": self.es_epochs_since_improvement,
+            "global_step": self.global_step,
+            "rng_python": random.getstate(),
+            "rng_numpy": np.random.get_state(),
+            "rng_torch_cpu": torch.get_rng_state(),
+            "rng_torch_cuda": (
+                torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+            ),
         }
 
         # Per-epoch checkpoint (local)
@@ -925,7 +1017,14 @@ class Trainer:
         # Global timer for ETA estimation
         start_time = time.time()
 
-        for epoch in range(1, num_epochs + 1):
+        if self.start_epoch > num_epochs:
+            self._log_styled(
+                f"[yellow]Resume start_epoch ({self.start_epoch}) > total epochs "
+                f"({num_epochs}); nothing to do.[/]"
+            )
+            return
+
+        for epoch in range(self.start_epoch, num_epochs + 1):
             epoch_start = time.time()
 
             train_metrics = self.train_one_epoch(epoch)
@@ -1015,6 +1114,7 @@ class Trainer:
 def main(
     overrides: Dict[str, Any] | None = None,
     model_overrides: Dict[str, Any] | None = None,
+    resume_exp: int | None = None,
 ) -> None:
     """
     Training entry point.
@@ -1023,6 +1123,8 @@ def main(
                       e.g. {"training.epochs": 5, "training.batch_size": 128}
     model_overrides:  dotted-key overrides applied to model_config.yaml.
                       e.g. {"model.dropout": 0.2}
+    resume_exp:       experiment id (e.g. 5 -> experiments/exp_005) to resume
+                      from. Loads last.pth and continues into the same dir.
     """
     # ------------------------------------------------------------------
     # Load configs (paths are fixed; edit here if needed)
@@ -1074,7 +1176,21 @@ def main(
             experiments_cfg.get("root_dir", "experiments"),
         )
     )
-    exp_dir, ckpt_dir = prepare_experiment_dirs(exp_root)
+    resume_path: Path | None = None
+    if resume_exp is not None:
+        exp_name = f"exp_{int(resume_exp):03d}"
+        exp_dir = exp_root / exp_name
+        ckpt_dir = exp_dir / "checkpoints"
+        resume_path = ckpt_dir / "last.pth"
+        if not resume_path.exists():
+            raise FileNotFoundError(
+                f"--resume {resume_exp}: {resume_path} not found. "
+                f"Cannot continue this experiment."
+            )
+        # Mirror dirs already exist from the original run; just reuse them.
+        print(f"[Trainer] resuming experiment {exp_name} from {resume_path}")
+    else:
+        exp_dir, ckpt_dir = prepare_experiment_dirs(exp_root)
 
     # Optional mirror root on Drive, configured in paths.yaml as:
     # experiments:
@@ -1163,6 +1279,9 @@ def main(
         mirror_exp_dir=mirror_exp_dir,
         mirror_ckpt_dir=mirror_ckpt_dir,
     )
+
+    if resume_path is not None:
+        trainer.load_resume_state(resume_path)
 
     trainer.fit()
 

@@ -267,15 +267,23 @@ def pick_phases(
             p_amp = p_amp_candidate
             p_time = p_idx / sample_rate
 
-    # S-phase pick
+    # S-phase pick: physically S must arrive after P. Constrain the S search
+    # to [p_idx + min_gap_samples, end]. Without this guard the picker
+    # routinely returns S before P on under-trained models, producing
+    # nonsensical picks (e.g. S=1.57s, P=15.91s on the Phase 3 smoke run).
     s_idx: Optional[int] = None
     s_time: Optional[float] = None
     s_amp: Optional[float] = None
 
-    if end >= start:
-        s_window = s[start : end + 1]
+    s_search_start = start
+    if p_idx is not None:
+        min_gap_samples = int(round(min_ps_gap_sec * sample_rate)) if min_ps_gap_sec > 0.0 else 1
+        s_search_start = max(s_search_start, p_idx + min_gap_samples)
+
+    if end >= s_search_start:
+        s_window = s[s_search_start : end + 1]
         s_rel_idx = int(np.argmax(s_window))
-        s_idx_candidate = start + s_rel_idx
+        s_idx_candidate = s_search_start + s_rel_idx
         s_amp_candidate = float(s[s_idx_candidate])
 
         if s_amp_candidate >= s_amp_threshold:
@@ -283,6 +291,8 @@ def pick_phases(
             s_amp = s_amp_candidate
             s_time = s_idx / sample_rate
 
+    # ps_gap_ok kept for backward compatibility; with the constraint above
+    # it will be True whenever both picks exist.
     ps_gap_ok: Optional[bool] = None
     if p_time is not None and s_time is not None and min_ps_gap_sec > 0.0:
         ps_gap_ok = (s_time - p_time) >= min_ps_gap_sec

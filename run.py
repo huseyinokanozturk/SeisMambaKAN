@@ -150,6 +150,8 @@ def train(
                                              help="Override data.mode (all|sample)."),
     amp: Optional[bool] = typer.Option(None, "--amp/--no-amp",
                                         help="Override model.use_amp."),
+    resume: Optional[int] = typer.Option(None, "--resume",
+                                          help="Resume training in experiments/exp_NNN/ from its last.pth."),
 ) -> None:
     main_overrides: dict = {}
     if epochs is not None:        main_overrides["training.epochs"] = int(epochs)
@@ -173,6 +175,7 @@ def train(
     trainer_main(
         overrides=main_overrides or None,
         model_overrides=model_overrides or None,
+        resume_exp=resume,
     )
     _ok("Training completed.")
 
