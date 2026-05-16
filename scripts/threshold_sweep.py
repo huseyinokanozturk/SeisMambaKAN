@@ -384,9 +384,12 @@ def main(argv: Optional[List[str]] = None) -> None:
     sample_rate = float(metrics_cfg.get("sample_rate", 100.0))
     base_picker_cfg = copy.deepcopy(metrics_cfg.get("picker", {}))
 
-    # Grid: focus on the levers that actually move metrics. 27 cells.
-    det_window_grid = [0.5, 0.6, 0.75]
-    p_amp_grid = [0.10, 0.15, 0.20]
+    # Grid expanded (v2) to explore lower det_window thresholds and the
+    # original p_amp=0.25 setting, since the v1 grid bottomed out at its
+    # lowest values (sweep kept choosing det_window=0.5) and the original
+    # p_amp=0.25 outperformed everything inside the v1 grid.
+    det_window_grid = [0.3, 0.4, 0.5, 0.6]
+    p_amp_grid = [0.10, 0.15, 0.20, 0.25]
     s_amp_grid = [0.10, 0.15, 0.20]
     trace_thr_grid = [0.6, 0.7, 0.8]
 

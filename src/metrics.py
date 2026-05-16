@@ -215,70 +215,59 @@ def _dominant_detection_window(
     pad_samples: int,
 ) -> Tuple[int, int]:
     """
-    Phase-5 picker fix (revised).
+    Phase-5 picker fix (third iteration).
 
-    Returns (start, end) sample indices for the phase search window. Two
-    failure modes the original union-of-above-threshold approach allowed,
-    handled here:
+    Returns (start, end) sample indices for the phase search window.
 
-      (1) Spurious detection blips outside the real event used to extend
-          the search range over the entire trace; the picker then
-          argmax'd inside the blip and produced 30-50 s phase errors.
-          Fix: select a single connected component (run of above-
-          threshold timesteps), scored by integrated detection mass —
-          sum(det[component]). Sum is more robust than length × max
-          against high-amplitude noise spikes that happen to peak above
-          a real but weaker event.
+    Two earlier approaches did not work in practice:
 
-      (2) Over-extended single components (model leaves detection above
-          threshold for tens of seconds) caused the picker to roam far
-          from the actual event center. Fix: only when a component is
-          pathologically wide (> 2 * max_half_sec) do we anchor on the
-          detection peak and clip to ±max_half_sec. Normal-width
-          components are kept verbatim — clipping a healthy component
-          would amputate P or S in long-PS-gap events (STEAD allows up
-          to 35 s between phases, so an aggressive ±10 s clip routinely
-          excluded the real P/S position; the first attempt of this fix
-          dropped P pick_rate from 0.91 to 0.79).
+      v1 ("dominant component, ±10 s peak bound"): clipped real events
+          with PS gap >20 s and dropped P pick_rate 0.91 -> 0.79.
+
+      v2 ("dominant component, soft bound at 50 s"): rejected real events
+          where detection briefly dipped below threshold between P and
+          S (a normal physical signature: less energy in the middle of
+          the trace). Each dip splits the mask into two components; the
+          picker keeps only the larger one and *loses one of the two
+          phases entirely*. P pick_rate stayed at 0.82-0.85 vs the
+          original union picker's 0.91.
+
+    v3 — what's implemented here — is the simplest correct combination:
+
+      1. Start from the *union* of above-threshold timesteps
+         (`first_above`, `last_above`). This is the original
+         picker behaviour and is naturally robust to mid-event dips.
+
+      2. Intersect with a peak-anchored band of `±max_half_sec` around
+         the global detection peak. Spurious blips that sit far from
+         the real-event peak (the failure mode behind val_worst_1 and
+         val_worst_2 with 30-50 s P/S errors) get clipped away because
+         they fall outside the band.
+
+      3. If the intersection is empty (shouldn't happen for real events
+         since the peak is by definition inside the union), fall back to
+         the bare union so we never collapse to a zero-width window.
     """
     T = int(det.shape[0])
     mask = det >= threshold
     if not bool(np.any(mask)):
         return 0, T - 1
 
-    # Connected components via mask transitions on a zero-padded array.
-    padded = np.concatenate([[0], mask.astype(np.int8), [0]])
-    diff = np.diff(padded)
-    starts = np.where(diff == 1)[0]
-    ends = np.where(diff == -1)[0]  # exclusive end indices into det
+    idx = np.where(mask)[0]
+    union_start = int(idx[0])
+    union_end = int(idx[-1])
 
-    # Score = integrated detection mass. Length × max biases toward short
-    # high-amplitude noise spikes; sum favours sustained activity which
-    # is the actual signature of a real event.
-    best_idx = 0
-    best_score = -1.0
-    for i, (s, e) in enumerate(zip(starts, ends)):
-        score = float(det[s:e].sum())
-        if score > best_score:
-            best_score = score
-            best_idx = i
-    comp_start = int(starts[best_idx])
-    comp_end = int(ends[best_idx]) - 1
+    peak = int(np.argmax(det))
+    half_width = int(round(max_half_sec * sample_rate))
+    bound_start = max(0, peak - half_width)
+    bound_end = min(T - 1, peak + half_width)
 
-    # Only clip the window when the chosen component is wider than a
-    # plausible event (2 * max_half_sec). Most events fit within this
-    # bound naturally; aggressive clipping in the normal case removes
-    # legitimate P or S positions and tanks pick_rate.
-    comp_width = comp_end - comp_start + 1
-    max_width = int(round(2.0 * max_half_sec * sample_rate))
-    if comp_width > max_width:
-        local_peak = comp_start + int(np.argmax(det[comp_start : comp_end + 1]))
-        half_width = int(round(max_half_sec * sample_rate))
-        start_clip = max(comp_start, local_peak - half_width)
-        end_clip = min(comp_end, local_peak + half_width)
-    else:
-        start_clip = comp_start
-        end_clip = comp_end
+    start_clip = max(union_start, bound_start)
+    end_clip = min(union_end, bound_end)
+    if end_clip < start_clip:
+        # Defensive fallback: keep the bare union rather than collapse.
+        start_clip = union_start
+        end_clip = union_end
 
     start = max(0, start_clip - pad_samples)
     end = min(T - 1, end_clip + pad_samples)
