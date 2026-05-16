@@ -176,6 +176,7 @@ class SeisMambaKAN(nn.Module):
         self.decoder_ups = nn.ModuleDict()
         self.decoder_proj = nn.ModuleDict()
         self.decoder_blocks = nn.ModuleDict()
+        self.stem_out_channels = stem_out_channels
 
         # Starting channels for decoder is the bottleneck d_model
         if self.bottleneck_name is None:
@@ -188,6 +189,8 @@ class SeisMambaKAN(nn.Module):
             n_layers = int(stage_cfg.get("n_layers", 1))
             up_factor = int(stage_cfg.get("upsample_factor", 2))
             skip_from = stage_cfg.get("skip_from", None)
+            use_kan_stage = bool(stage_cfg.get("use_kan", True))
+            skip_stem_stage = bool(stage_cfg.get("skip_stem", False))
 
             # 1) Upsample: (B, current_channels, T) -> (B, d_model, T_up)
             self.decoder_ups[name] = UpSample1D(
@@ -198,7 +201,7 @@ class SeisMambaKAN(nn.Module):
                 activation=self.activation,
             )
 
-            # 2) After concatenation with skip, channels increase
+            # 2) After concatenation with skip(s), channels increase
             in_after_concat = d_model
             if self.decoder_concat_skips and skip_from is not None:
                 if skip_from not in self.encoder_channels:
@@ -206,6 +209,8 @@ class SeisMambaKAN(nn.Module):
                         f"Decoder stage '{name}' refers to unknown skip_from='{skip_from}'."
                     )
                 in_after_concat += self.encoder_channels[skip_from]
+            if skip_stem_stage:
+                in_after_concat += stem_out_channels
 
             # 3) Project concatenated channels back to d_model
             self.decoder_proj[name] = ConvNormAct1d(
@@ -219,12 +224,52 @@ class SeisMambaKAN(nn.Module):
                 activation=self.activation,
             )
 
-            # 4) KAN blocks
+            # 4) Stage blocks (KAN if use_kan_stage else ConvNormAct1d)
             blocks: List[nn.Module] = []
             for _ in range(n_layers):
-                blocks.append(
+                if use_kan_stage:
+                    blocks.append(
+                        KANBlock1D(
+                            d_model=d_model,
+                            grid_size=self.kan_grid_size,
+                            spline_order=self.kan_spline_order,
+                            base_activation=self.kan_base_activation,
+                            dropout=self.kan_dropout,
+                            norm_type=self.norm_type,
+                            layer_norm_eps=self.kan_layer_norm_eps,
+                            enable_standalone_scale_spline=self.kan_enable_standalone_scale_spline,
+                        )
+                    )
+                else:
+                    blocks.append(
+                        ConvNormAct1d(
+                            in_channels=d_model,
+                            out_channels=d_model,
+                            kernel_size=3,
+                            stride=1,
+                            padding=1,
+                            bias=True,
+                            norm_type=self.norm_type,
+                            activation=self.activation,
+                        )
+                    )
+            self.decoder_blocks[name] = nn.Sequential(*blocks)
+
+            current_channels = d_model
+
+        # ------------------------------------------------------------------
+        # Optional pre-head KAN block(s): extra non-linear capacity right
+        # before the heads. Helpful when most decoder stages are sparsified
+        # to plain conv blocks (Phase 3.2 + 3.3).
+        # ------------------------------------------------------------------
+        pre_head_cfg = dec_cfg.get("pre_head_kan", {})
+        if bool(pre_head_cfg.get("enabled", False)):
+            ph_layers = int(pre_head_cfg.get("n_layers", 1))
+            ph_blocks: List[nn.Module] = []
+            for _ in range(ph_layers):
+                ph_blocks.append(
                     KANBlock1D(
-                        d_model=d_model,
+                        d_model=current_channels,
                         grid_size=self.kan_grid_size,
                         spline_order=self.kan_spline_order,
                         base_activation=self.kan_base_activation,
@@ -234,9 +279,9 @@ class SeisMambaKAN(nn.Module):
                         enable_standalone_scale_spline=self.kan_enable_standalone_scale_spline,
                     )
                 )
-            self.decoder_blocks[name] = nn.Sequential(*blocks)
-
-            current_channels = d_model
+            self.pre_head_kan = nn.Sequential(*ph_blocks)
+        else:
+            self.pre_head_kan = nn.Identity()
 
         # ------------------------------------------------------------------
         # Heads: detection / P / S
@@ -349,6 +394,7 @@ class SeisMambaKAN(nn.Module):
 
         # Stem
         x = self.stem(x)
+        stem_feat = x  # full-resolution raw spectral features for stem-skip
 
         # Encoder
         skips: Dict[str, torch.Tensor] = {}
@@ -368,29 +414,38 @@ class SeisMambaKAN(nn.Module):
         for stage_cfg in self.decoder_stage_specs:
             name = stage_cfg["name"]
             skip_from = stage_cfg.get("skip_from", None)
+            skip_stem_stage = bool(stage_cfg.get("skip_stem", False))
 
             # 1) Upsample
             y = self.decoder_ups[name](y)
 
-            # 2) Concat skip if enabled
+            # 2) Concat skip(s) if enabled. Align lengths by cropping to the
+            #    minimum length across y / skip_from / stem to absorb any
+            #    rounding from up/downsample stack.
+            concat_list: List[torch.Tensor] = [y]
             if self.decoder_concat_skips and skip_from is not None:
                 if skip_from not in skips:
                     raise KeyError(
                         f"Skip feature '{skip_from}' not found in encoder outputs."
                     )
-                skip_feat = skips[skip_from]
-                if skip_feat.size(-1) != y.size(-1):
-                    # In case of off-by-one due to padding/stride, center crop or pad
-                    min_len = min(skip_feat.size(-1), y.size(-1))
-                    skip_feat = skip_feat[..., :min_len]
-                    y = y[..., :min_len]
-                y = torch.cat([y, skip_feat], dim=1)
+                concat_list.append(skips[skip_from])
+            if skip_stem_stage:
+                concat_list.append(stem_feat)
+
+            if len(concat_list) > 1:
+                min_len = min(t.size(-1) for t in concat_list)
+                concat_list = [t[..., :min_len] for t in concat_list]
+                y = torch.cat(concat_list, dim=1)
+            # else: y stays unchanged
 
             # 3) Project to d_model
             y = self.decoder_proj[name](y)
 
-            # 4) KAN blocks
+            # 4) Stage blocks (KAN or ConvNormAct1d per stage config)
             y = self.decoder_blocks[name](y)
+
+        # Optional pre-head KAN block(s)
+        y = self.pre_head_kan(y)
 
         # Heads
         h = self.head_input_proj(y)

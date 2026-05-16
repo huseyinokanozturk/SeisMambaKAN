@@ -6,16 +6,21 @@ model:
   normalization: "layernorm"
   activation: "silu"
   dropout: 0.10
-  use_channels_last: false    # Optional: used by training loop for memory optimization
-  # Optional mixed precision flag (can be used in training script)
+  use_channels_last: false   # Optional: used by training loop for memory optimization
+
+  # Mixed precision. Phase 3 leaves this off for the T4 smoke test (Turing
+  # has no native bf16). Phase 4 flips it on for A100 production runs and
+  # the trainer will read `amp_dtype` to pick the right autocast dtype.
   use_amp: false
+  amp_dtype: "bfloat16"      # "bfloat16" (A100/H100) or "float16" (older GPUs)
 
 # ============================================================
 # ENCODER: 1D U-Net + Mamba Architecture
+# (Phase 3: widened channels, bigger Mamba, lighter bottleneck.)
 # ============================================================
 encoder:
   stem:
-    out_channels: 16         # Reduced from 64 to 16 for significant parameter savings
+    out_channels: 32         # Phase 3.1: 16 -> 32 (richer initial features)
     kernel_size: 7
     stride: 1
     padding: 3
@@ -24,38 +29,38 @@ encoder:
   # Progressive downsampling: 6000 → 6000 → 3000 → 1500 → 750 → 375
   stages:
     - name: "enc_stage_0"
-      d_model: 16
+      d_model: 48            # Phase 3.1: 16 -> 48
       n_layers: 1
       downsample_factor: 1   # Maintains resolution: 6000 → 6000
       use_mamba: true
 
     - name: "enc_stage_1"
-      d_model: 24
+      d_model: 64            # Phase 3.1: 24 -> 64
       n_layers: 2
       downsample_factor: 2   # First downsampling: 6000 → 3000
       use_mamba: true
 
     - name: "enc_stage_2"
-      d_model: 32
+      d_model: 96            # Phase 3.1: 32 -> 96
       n_layers: 2
       downsample_factor: 2   # Second downsampling: 3000 → 1500
       use_mamba: true
 
     - name: "enc_stage_3"
-      d_model: 48
+      d_model: 128           # Phase 3.1: 48 -> 128
       n_layers: 2
       downsample_factor: 2   # Third downsampling: 1500 → 750
       use_mamba: true
 
     - name: "bottleneck"
-      d_model: 64            # Lightweight bottleneck instead of heavy ResNet head
-      n_layers: 3
+      d_model: 192           # Phase 3.1: 64 -> 192
+      n_layers: 2            # Phase 3.4: 3 -> 2 layers (paired with stronger d_state/expand)
       downsample_factor: 2   # Final downsampling: 750 → 375
       use_mamba: true
 
   mamba:
-    d_state: 16
-    expand_factor: 1.5       # Reduced from 2.0 to 1.5 for lighter parameters and FLOPs
+    d_state: 32              # Phase 3.4: 16 -> 32
+    expand_factor: 2.0       # Phase 3.4: 1.5 -> 2.0
     conv_kernel: 4
     dropout: 0.10
     bias: true
@@ -63,75 +68,80 @@ encoder:
     layer_norm_eps: 1e-5
 
 # ============================================================
-# DECODER: U-Net Upsampling + KAN Block Integration
+# DECODER: U-Net Upsampling + sparse KAN integration
+# (Phase 3.2: KAN only on the final, full-resolution stage + a
+#  pre-head KAN block. Other stages use ConvNormAct1d, which is
+#  cheaper and easier to optimize given much wider channels.)
 # ============================================================
 decoder:
-  upsample_mode: "conv_transpose"  # Uses 1D ConvTranspose for upsampling
-  concat_skips: true               # U-Net style skip connections: [upsampled] ⊕ [skip]
+  upsample_mode: "conv_transpose"
+  concat_skips: true               # U-Net style skip connections
 
-  # Progressive upsampling: 375 → 750 → 1500 → 3000 → 6000
   stages:
     - name: "dec_stage_3"
-      d_model: 48
+      d_model: 128                 # Phase 3.1
       n_layers: 1
       upsample_factor: 2
       skip_from: "enc_stage_3"
-      use_kan: true
+      use_kan: false               # Phase 3.2: ConvNormAct1d here
 
     - name: "dec_stage_2"
-      d_model: 32
+      d_model: 96                  # Phase 3.1
       n_layers: 1
       upsample_factor: 2
       skip_from: "enc_stage_2"
-      use_kan: true
+      use_kan: false               # Phase 3.2: ConvNormAct1d here
 
     - name: "dec_stage_1"
-      d_model: 24
+      d_model: 64                  # Phase 3.1
       n_layers: 1
       upsample_factor: 2
       skip_from: "enc_stage_1"
-      use_kan: true
+      use_kan: false               # Phase 3.2: ConvNormAct1d here
 
     - name: "dec_stage_0"
-      d_model: 16
+      d_model: 48                  # Phase 3.1
       n_layers: 1
       upsample_factor: 2
       skip_from: "enc_stage_0"
-      use_kan: true
+      skip_stem: true              # Phase 3.3: extra stem-level skip for sharp P
+      use_kan: true                # Phase 3.2: keep KAN only at final stage
+
+  # Phase 3.2/3.3: extra non-linear capacity right before the heads.
+  pre_head_kan:
+    enabled: true
+    n_layers: 1
 
   kan:
-    # Hidden dimension calculated as: hidden_dim = int(d_model * hidden_factor)
-    hidden_factor: 2.0        # Multiplier for hidden dimension calculation
-    grid_size: 3              # Reduced from 5 to 3 for computational efficiency while maintaining flexibility
+    hidden_factor: 2.0
+    grid_size: 3
     spline_order: 3
     base_activation: "silu"
     dropout: 0.10
     bias: true
-    apply_per_timestep: true  # Apply KAN per timestep: (T, C) → KAN applied to each time step
+    apply_per_timestep: true
 
 # ============================================================
 # OUTPUT HEADS: Detection + P-wave + S-wave Prediction
 # ============================================================
 heads:
   shared:
-    in_channels: 16       # Input from dec_stage_0 output (C=16, L=6000)
+    in_channels: 48       # Phase 3.1: matches dec_stage_0 output (C=48)
     kernel_size: 1
     bias: true
 
   detection:
     type: "ConvHead1D"
-    # Head outputs LOGITS now (no sigmoid). Loss uses BCEWithLogitsLoss for
-    # numerical stability + AMP safety. Downstream code (metrics.py, inference.py)
-    # applies torch.sigmoid explicitly when probabilities are needed.
+    # Head outputs LOGITS (no sigmoid). BCEWithLogitsLoss in losses.py.
     out_channels: 1
     activation: "none"
     target: "detection"
-    loss: "bce"             # Binary cross-entropy loss (readable by training loop)
+    loss: "bce"
 
   p_gaussian:
     type: "ConvHead1D"
     out_channels: 1
-    activation: "none"      # No activation for Gaussian labels with MSE loss
+    activation: "none"
     target: "p_gaussian"
     loss: "mse"
 
@@ -149,14 +159,14 @@ regularization:
   weight_decay: 0.01
   dropout: 0.10
 
-  # Future extensibility: label smoothing parameters
   label_smoothing:
     detection: 0.0
     p_gaussian: 0.0
     s_gaussian: 0.0
 
+# Phase 3.5: kaiming_normal is the right choice for ReLU/SiLU-style
+# activations and wider channels (xavier_uniform was tuned for a smaller
+# tanh/sigmoid-era architecture). Mamba/KAN keep their own internal init.
 init:
-  type: "xavier_uniform"
+  type: "kaiming_normal"
   gain: 1.0
-
-
