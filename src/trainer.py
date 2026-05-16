@@ -210,6 +210,49 @@ def build_scheduler(
 
 
 # =============================================================================
+# Exponential Moving Average (Phase 4)
+# =============================================================================
+
+
+class _EMA:
+    """
+    Minimal EMA over model parameters. Validation (and the best-model save)
+    swaps the live weights for the EMA shadow, then restores them after.
+    EMA smooths the OneCycleLR end-of-training oscillation and is the cheap
+    half-percent improvement that EQTransformer-style recipes rely on.
+    """
+
+    def __init__(self, model: torch.nn.Module, decay: float = 0.999):
+        self.decay = float(decay)
+        self.shadow: Dict[str, torch.Tensor] = {}
+        for n, p in model.named_parameters():
+            if p.requires_grad:
+                self.shadow[n] = p.detach().clone()
+        self._backup: Dict[str, torch.Tensor] = {}
+
+    @torch.no_grad()
+    def update(self, model: torch.nn.Module) -> None:
+        for n, p in model.named_parameters():
+            if p.requires_grad and n in self.shadow:
+                self.shadow[n].mul_(self.decay).add_(p.detach(), alpha=1.0 - self.decay)
+
+    @torch.no_grad()
+    def apply_shadow(self, model: torch.nn.Module) -> None:
+        self._backup = {}
+        for n, p in model.named_parameters():
+            if p.requires_grad and n in self.shadow:
+                self._backup[n] = p.detach().clone()
+                p.data.copy_(self.shadow[n])
+
+    @torch.no_grad()
+    def restore(self, model: torch.nn.Module) -> None:
+        for n, p in model.named_parameters():
+            if p.requires_grad and n in self._backup:
+                p.data.copy_(self._backup[n])
+        self._backup = {}
+
+
+# =============================================================================
 # Trainer
 # =============================================================================
 
@@ -261,8 +304,34 @@ class Trainer:
         # Whether to attempt channels_last layout for 4D tensors
         self.channels_last = bool(use_channels_last)
 
-        # AMP scaler (new torch.amp API)
-        self.scaler = amp.GradScaler(enabled=self.use_amp)
+        # --- AMP dtype (Phase 4) ---
+        # Mamba is unstable in fp16; on A100 we want bf16. On older GPUs (Turing /
+        # T4) bf16 is unsupported, so we disable AMP entirely rather than fall
+        # back to fp16 (which would corrupt the SSM step).
+        amp_dtype_str = str(model_cfg.get("model", {}).get("amp_dtype", "float16")).lower()
+        if amp_dtype_str in ("bfloat16", "bf16"):
+            self.amp_dtype = torch.bfloat16
+        elif amp_dtype_str in ("float16", "fp16", "half"):
+            self.amp_dtype = torch.float16
+        else:
+            self.amp_dtype = torch.float32  # disables AMP impact even if use_amp=True
+
+        if (
+            self.use_amp
+            and self.amp_dtype == torch.bfloat16
+            and self.device.type == "cuda"
+            and not torch.cuda.is_bf16_supported()
+        ):
+            print(
+                "[WARN] bf16 requested but this GPU does not support it; "
+                "disabling AMP (Mamba unstable in fp16)."
+            )
+            self.use_amp = False
+
+        # GradScaler is only meaningful for fp16; bf16 has the same exponent
+        # range as fp32 and does not need loss scaling.
+        scaler_enabled = bool(self.use_amp) and (self.amp_dtype == torch.float16)
+        self.scaler = amp.GradScaler(enabled=scaler_enabled)
 
         # --- Stability knobs (Phase 0) ---
         self.grad_clip_max_norm: float = float(
@@ -271,6 +340,15 @@ class Trainer:
         self.nan_threshold: int = int(self.train_cfg.get("nan_threshold", 10))
         self.consecutive_nan_count: int = 0
         self.global_step: int = 0
+
+        # --- EMA weights (Phase 4) ---
+        # Initialize the shadow BEFORE training starts so update() always sees a
+        # complete dict. Set to None when disabled to keep the train/val hot
+        # path branchless.
+        ema_cfg = self.train_cfg.get("ema", {}) or {}
+        self.ema_enabled: bool = bool(ema_cfg.get("enabled", False))
+        self.ema_decay: float = float(ema_cfg.get("decay", 0.999))
+        self.ema = _EMA(model, self.ema_decay) if self.ema_enabled else None
 
         # --- Early stopping (Phase 2.5) ---
         es_cfg = self.train_cfg.get("early_stopping", {}) or {}
@@ -438,7 +516,19 @@ class Trainer:
         t.add_row("LR (peak)", f"{self.train_cfg.get('learning_rate', '?')}")
         t.add_row("Scheduler", type(self.scheduler).__name__ if self.scheduler else "[dim]none[/]")
         t.add_row("Grad clip", f"{self.grad_clip_max_norm:.2f}" if self.grad_clip_max_norm > 0 else "[dim]none[/]")
-        t.add_row("AMP", "[green]on[/]" if self.use_amp else "[dim]off[/]")
+        if self.use_amp:
+            dtype_label = {
+                torch.bfloat16: "bf16",
+                torch.float16: "fp16",
+                torch.float32: "fp32",
+            }.get(self.amp_dtype, str(self.amp_dtype))
+            t.add_row("AMP", f"[green]on[/] [cyan]{dtype_label}[/]")
+        else:
+            t.add_row("AMP", "[dim]off[/]")
+        if self.ema is not None:
+            t.add_row("EMA", f"[green]on[/] decay={self.ema_decay}")
+        else:
+            t.add_row("EMA", "[dim]disabled[/]")
         if self.es_enabled:
             t.add_row(
                 "Early stop",
@@ -587,7 +677,11 @@ class Trainer:
 
             self.optimizer.zero_grad(set_to_none=True)
 
-            with amp.autocast(device_type=self.device.type, enabled=self.use_amp):
+            with amp.autocast(
+                device_type=self.device.type,
+                enabled=self.use_amp,
+                dtype=self.amp_dtype,
+            ):
                 outputs = self.model(x)
                 loss_dict = self.loss_fn(outputs, labels)
                 total_loss = loss_dict["total"]
@@ -612,14 +706,20 @@ class Trainer:
             # ----- Backward + grad clip + step -----
             self.scaler.scale(total_loss).backward()
             if self.grad_clip_max_norm > 0:
-                # Unscale before clipping so the norm is in real-loss units.
-                self.scaler.unscale_(self.optimizer)
+                # Only unscale when the scaler is actually active (fp16). With
+                # bf16 / AMP off the gradients are already in real units.
+                if self.scaler.is_enabled():
+                    self.scaler.unscale_(self.optimizer)
                 torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(),
                     max_norm=self.grad_clip_max_norm,
                 )
             self.scaler.step(self.optimizer)
             self.scaler.update()
+
+            # EMA update tracks the live weights right after a successful step.
+            if self.ema is not None:
+                self.ema.update(self.model)
 
             # Per-step LR scheduler (OneCycleLR is per-step)
             if self.scheduler is not None:
@@ -702,7 +802,11 @@ class Trainer:
             x = self._prepare_inputs(x)
             labels = self._move_labels_to_device(labels)
 
-            with amp.autocast(device_type=self.device.type, enabled=self.use_amp):
+            with amp.autocast(
+                device_type=self.device.type,
+                enabled=self.use_amp,
+                dtype=self.amp_dtype,
+            ):
                 outputs = self.model(x)
                 loss_dict = self.loss_fn(outputs, labels)
 
@@ -807,7 +911,11 @@ class Trainer:
         self._log_to_file(f"Experiment directory: {self.exp_dir}")
         if self.mirror_exp_dir is not None:
             self._log_to_file(f"Mirror experiment directory: {self.mirror_exp_dir}")
-        self._log_to_file(f"Device: {self.device.type}, AMP: {self.use_amp}")
+        amp_state = f"on ({self.amp_dtype})" if self.use_amp else "off"
+        ema_state = f"on (decay={self.ema_decay})" if self.ema is not None else "off"
+        self._log_to_file(
+            f"Device: {self.device.type}, AMP: {amp_state}, EMA: {ema_state}"
+        )
         self._log_to_file(
             f"Steps per epoch: {self.steps_per_epoch}, total steps: {self.total_steps}"
             if self.steps_per_epoch is not None
@@ -821,6 +929,12 @@ class Trainer:
             epoch_start = time.time()
 
             train_metrics = self.train_one_epoch(epoch)
+
+            # Swap in the EMA shadow for validation and checkpoint saving so
+            # that best_model.pth captures the smoothed weights. Restored at
+            # the end of the epoch before the next train pass.
+            if self.ema is not None:
+                self.ema.apply_shadow(self.model)
             val_metrics = self.validate_one_epoch(epoch)
 
             # Timing information
@@ -861,6 +975,11 @@ class Trainer:
                 )
 
             self._save_checkpoint(epoch, val_metrics, is_best=is_best)
+
+            # Restore live weights so the next train epoch continues from the
+            # un-smoothed optimizer trajectory.
+            if self.ema is not None:
+                self.ema.restore(self.model)
 
             # ----- Early stopping (Phase 2.5) -----
             if self.es_enabled:

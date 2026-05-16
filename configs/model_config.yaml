@@ -8,10 +8,11 @@ model:
   dropout: 0.10
   use_channels_last: false   # Optional: used by training loop for memory optimization
 
-  # Mixed precision. Phase 3 leaves this off for the T4 smoke test (Turing
-  # has no native bf16). Phase 4 flips it on for A100 production runs and
-  # the trainer will read `amp_dtype` to pick the right autocast dtype.
-  use_amp: false
+  # Mixed precision (Phase 4). On A100/H100 bf16 is the right choice; Mamba
+  # is numerically unstable in fp16. If the runtime GPU does not support
+  # bf16 (e.g. T4 / Turing) the trainer auto-disables AMP rather than
+  # falling back to fp16 — so this config is safe on both A100 and T4.
+  use_amp: true
   amp_dtype: "bfloat16"      # "bfloat16" (A100/H100) or "float16" (older GPUs)
 
 # ============================================================
