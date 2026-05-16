@@ -51,6 +51,10 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--prefer", choices=["best", "last", "auto"], default="best")
     p.add_argument("--data-mode", choices=["all", "sample"], default=None,
                    help="Override data.mode from config.yaml.")
+    p.add_argument("--from-sweep", action="store_true",
+                   help="Load best picker/detection thresholds from "
+                        "results/exp_NNN/<split>/threshold_sweep.json "
+                        "(produced by `run.py sweep`).")
     p.add_argument("--no-drive-mirror", action="store_true",
                    help="Skip mirroring results to Drive even if mounted.")
     return p.parse_args(argv)
@@ -144,6 +148,40 @@ def main(argv: Optional[list[str]] = None) -> None:
     print(f"[Eval] exp_id:     {exp_id}")
     print(f"[Eval] split:      {args.split}")
     print(f"[Eval] device:     {device}")
+
+    # ----- optional: load best thresholds from a prior sweep run ----------
+    if args.from_sweep:
+        results_cfg_pre = paths_cfg.get("results", {})
+        results_root_pre = project_root() / results_cfg_pre.get("root_dir", "results")
+        if exp_id is None:
+            raise SystemExit(
+                "[Eval] --from-sweep needs an exp id; pass --exp or rerun without "
+                "--ckpt so we can infer it from the experiment dir."
+            )
+        sweep_json = results_root_pre / f"exp_{exp_id:03d}" / args.split / "threshold_sweep.json"
+        if not sweep_json.exists():
+            raise FileNotFoundError(
+                f"--from-sweep: no sweep file at {sweep_json}. Run "
+                f"`run.py sweep --split {args.split} --data-mode all` first."
+            )
+        import json as _json
+        with sweep_json.open("r", encoding="utf-8") as f:
+            sweep_data = _json.load(f)
+        best = sweep_data.get("best", {})
+        best_overrides = best.get("overrides", {})
+        best_trace_thr = best.get("trace_threshold")
+        metrics_cfg = main_cfg.setdefault("metrics", {})
+        picker_cfg_ref = metrics_cfg.setdefault("picker", {})
+        detection_cfg_ref = metrics_cfg.setdefault("detection", {})
+        for k, v in best_overrides.items():
+            picker_cfg_ref[k] = v
+        if best_trace_thr is not None:
+            detection_cfg_ref["trace_threshold"] = float(best_trace_thr)
+        print(f"[Eval] --from-sweep applied from {sweep_json}:")
+        for k, v in best_overrides.items():
+            print(f"         picker.{k} = {v}")
+        if best_trace_thr is not None:
+            print(f"         detection.trace_threshold = {best_trace_thr}")
 
     # ----- build model -----------------------------------------------------
     model = SeisMambaKAN(model_cfg).to(device)

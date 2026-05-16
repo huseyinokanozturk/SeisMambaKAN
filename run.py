@@ -194,6 +194,9 @@ def eval(
     prefer: str = typer.Option("best", "--prefer", help="best | last | auto"),
     data_mode: Optional[str] = typer.Option(None, "--data-mode",
                                              help="Override data.mode (all|sample)."),
+    from_sweep: bool = typer.Option(False, "--from-sweep",
+                                     help="Load best picker/detection thresholds "
+                                          "from results/exp_NNN/<split>/threshold_sweep.json."),
     no_drive_mirror: bool = typer.Option(False, "--no-drive-mirror"),
 ) -> None:
     if split not in ("val", "test"):
@@ -212,6 +215,8 @@ def eval(
         argv += ["--ckpt", ckpt]
     if data_mode is not None:
         argv += ["--data-mode", data_mode]
+    if from_sweep:
+        argv += ["--from-sweep"]
     if no_drive_mirror:
         argv += ["--no-drive-mirror"]
     eval_main(argv)
