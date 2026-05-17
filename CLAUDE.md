@@ -19,9 +19,15 @@ When in doubt about a path, naming, or convention, read this file first.
   - `p_gaussian` : (B, T) Gaussian-shaped peak around P arrival
   - `s_gaussian` : (B, T) Gaussian-shaped peak around S arrival
 - Baseline being compared against: a separate **SeisConformer** project
-  (TensorFlow, 1D-CNN + BiLSTM + Conformer + attention U-Net decoders).
-  SeisMambaKAN is allowed to score lower than SeisConformer; the
-  contribution is the *architecture* (Mamba+KAN hybrid).
+  (TensorFlow, 1D-CNN + BiLSTM + Conformer + attention U-Net decoders),
+  built by the same author. SeisConformer reaches SOTA on STEAD
+  (F1 0.9999, P MAE 19 ms, S MAE 85 ms) — *better* than published
+  EQTransformer numbers on the same test set.
+- **SeisMambaKAN target is SeisConformer parity, not "thesis-defending
+  acceptable".** Phase 7 (see `PHASE_7.md`) is the active recipe
+  rewrite to close the gap. The contribution is the Mamba+KAN hybrid
+  *architecture*; the metrics must at minimum match the SC baseline,
+  otherwise the architecture cannot be defended.
 
 ## 2. The three environments
 
@@ -154,6 +160,7 @@ configs, and small assets. `.gitignore` enforces this; do not weaken it.
 
 ## 6. When something is unclear
 
+- Read `PHASE_7.md` for the current recipe / target answer.
 - Read `RUNBOOK.md` for the operational answer.
 - Read `configs/paths.yaml` for the where-things-go answer.
 - Read `src/trainer.py` for the training-flow answer.

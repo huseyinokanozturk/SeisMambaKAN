@@ -87,13 +87,21 @@ def make_detection_label(
     device: torch.device | None = None,
 ) -> torch.Tensor:
     """
-    Generate binary detection target:
+    Generate binary BOX detection target (Phase 7 = SeisConformer recipe):
 
-        - 1 between P and S (optionally expanded by a small margin)
-        - 0 elsewhere
+        y[t] = 1.0 for t in [P - margin, S + margin]
+        y[t] = 0.0 elsewhere
 
-    This target is used by the detection head to mark the "event window".
-    The downstream picker can then restrict P/S search to this region.
+    The box covers the full event window — from the first P motion through
+    the S coda — so the detection head learns "is this a real event?" over
+    a wide context instead of just two narrow peaks. The phase heads then
+    multiply their loss by this mask (see `losses.py:_compute_phase_loss`),
+    which focuses the peak-weighted MSE on the event window only and
+    yields the order-of-magnitude gradient at the peak that SC needs for
+    19 ms P MAE.
+
+    `margin_samples` is read from `cfg_labels.detection.margin_samples`
+    and is set to 50 (0.5 s @ 100 Hz) in Phase 7 — same as SC.
 
     For noise traces (no valid P/S picks), the detection label is all zeros.
     """
@@ -345,10 +353,11 @@ class SeismicAugmenter:
         Add Gaussian white noise to the waveform with a given probability.
         Noise is scaled relative to the normalized signal.
 
-        Accepts either:
-          - `std_range: [a, b]`  (new, Phase 2.2): per-sample uniform random std
-          - `std: X`             (legacy): a single fixed std
-        If both are present, `std_range` wins.
+        Phase 7: only the fixed `std: X` form is used (SeisConformer
+        recipe). `std_range: [a, b]` from Phase 2.2 is still accepted for
+        backward compatibility with older configs, but no active Phase 7
+        config sets it — leaving the random-range path as dead code is
+        fine and avoids breaking unrelated callers.
         """
         cfg = self.cfg_noise
         prob = float(cfg.get("prob", 0.0))

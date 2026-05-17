@@ -4,7 +4,7 @@ Threshold sweep for picker hyperparameters (Phase 5.1).
 Workflow:
 1. Run the model once on the chosen split (val by default), cache raw head
    outputs in RAM (~5 GB for full STEAD val, fits in Colab A100 RAM).
-2. Grid-search over (det_window_threshold, p_amp_threshold, s_amp_threshold,
+2. Grid-search over (det_threshold, p_threshold, s_threshold,
    trace_threshold). For each combination, recompute picks + summary metrics
    without re-running the model.
 3. Print the top-N cells by a composite score (we minimize P/S median errors
@@ -301,9 +301,9 @@ def _format_row(row: Dict[str, Any], rank: int) -> str:
     s = row["s"]
     t = row["trace"]
     return (
-        f"#{rank:02d}  det_thr={o.get('det_window_threshold', '?'):.2f} "
-        f"p_amp={o.get('p_amp_threshold', '?'):.2f} "
-        f"s_amp={o.get('s_amp_threshold', '?'):.2f} "
+        f"#{rank:02d}  det_thr={o.get('det_threshold', '?'):.2f} "
+        f"p_amp={o.get('p_threshold', '?'):.2f} "
+        f"s_amp={o.get('s_threshold', '?'):.2f} "
         f"trace_thr={row['trace_threshold']:.2f}  "
         f"|  F1={t['f1']:.4f} spec={t['specificity']:.4f}  "
         f"|  P: pick={p['pick_rate']:.3f} medae={p['medae']*1000:6.1f}ms "
@@ -384,25 +384,26 @@ def main(argv: Optional[List[str]] = None) -> None:
     sample_rate = float(metrics_cfg.get("sample_rate", 100.0))
     base_picker_cfg = copy.deepcopy(metrics_cfg.get("picker", {}))
 
-    # Grid expanded (v2) to explore lower det_window thresholds and the
-    # original p_amp=0.25 setting, since the v1 grid bottomed out at its
-    # lowest values (sweep kept choosing det_window=0.5) and the original
-    # p_amp=0.25 outperformed everything inside the v1 grid.
-    det_window_grid = [0.3, 0.4, 0.5, 0.6]
-    p_amp_grid = [0.10, 0.15, 0.20, 0.25]
-    s_amp_grid = [0.10, 0.15, 0.20]
+    # Phase 7: grid bounded around SC's defaults (det 0.5 / p 0.25 / s 0.25).
+    # The Phase 7 picker has many more knobs (adaptive_k, search windows,
+    # smoothing sigmas) but those are intentionally NOT swept — SC's
+    # numbers are the proven SOTA recipe; only the three main confidence
+    # thresholds are exposed for downstream nudging.
+    det_grid = [0.3, 0.4, 0.5, 0.6]
+    p_amp_grid = [0.15, 0.20, 0.25, 0.30]
+    s_amp_grid = [0.15, 0.20, 0.25, 0.30]
     trace_thr_grid = [0.6, 0.7, 0.8]
 
-    combos = list(itertools.product(det_window_grid, p_amp_grid, s_amp_grid, trace_thr_grid))
+    combos = list(itertools.product(det_grid, p_amp_grid, s_amp_grid, trace_thr_grid))
     print(f"[sweep] grid: {len(combos)} combinations on {cache['det_pred'].shape[0]} samples")
 
     results: List[Dict[str, Any]] = []
     t0 = time.time()
     for i, (dw, pa, sa, tt) in enumerate(combos):
         overrides = {
-            "det_window_threshold": dw,
-            "p_amp_threshold": pa,
-            "s_amp_threshold": sa,
+            "det_threshold": dw,
+            "p_threshold": pa,
+            "s_threshold": sa,
         }
         row = _evaluate_combo(
             cache,
@@ -435,9 +436,9 @@ def main(argv: Optional[List[str]] = None) -> None:
                 "split": args.split,
                 "n_samples": int(cache["det_pred"].shape[0]),
                 "grid": {
-                    "det_window_threshold": det_window_grid,
-                    "p_amp_threshold": p_amp_grid,
-                    "s_amp_threshold": s_amp_grid,
+                    "det_threshold": det_grid,
+                    "p_threshold": p_amp_grid,
+                    "s_threshold": s_amp_grid,
                     "trace_threshold": trace_thr_grid,
                 },
                 "best": results[0],
@@ -451,9 +452,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     best = results[0]
     print("\n[sweep] suggested config.yaml metrics.detection / metrics.picker:")
     print(f"  detection.trace_threshold:    {best['trace_threshold']}")
-    print(f"  picker.det_window_threshold:  {best['overrides']['det_window_threshold']}")
-    print(f"  picker.p_amp_threshold:       {best['overrides']['p_amp_threshold']}")
-    print(f"  picker.s_amp_threshold:       {best['overrides']['s_amp_threshold']}")
+    print(f"  picker.det_threshold:  {best['overrides']['det_threshold']}")
+    print(f"  picker.p_threshold:       {best['overrides']['p_threshold']}")
+    print(f"  picker.s_threshold:       {best['overrides']['s_threshold']}")
 
 
 if __name__ == "__main__":

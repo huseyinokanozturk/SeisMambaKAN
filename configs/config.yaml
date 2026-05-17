@@ -72,24 +72,24 @@ labels:
   # Total time steps used for label generation (should match window length).
   total_length: 6000
 
-  # Detection head target:
-  # Typically a wider window around P and/or between P and S.
+  # Detection head target (Phase 7):
+  # Binary BOX label covering the event window [P - margin, S + margin].
+  # SeisConformer uses margin = 50 samples (0.5 s @ 100 Hz) on each side.
+  # Gaussian σ=10 from Phase 1.2 starved the detection head of
+  # event-context (it only saw a 100 ms ring around P/S); SC's box label
+  # gives the full event window 1.0 supervision and dramatically improves
+  # detection f1 + provides a real mask for the phase loss.
   detection:
-    # Label type for detection head (currently "gaussian" or "binary" planned).
-    type: "gaussian"
+    type: "box"           # Phase 7: was "gaussian"
 
-    # Standard deviation of the Gaussian (in samples) used for detection target.
-    # 10 samples = 100ms @ 100Hz. PhaseNet/EQTransformer-style; tight enough to
-    # encourage sharp peak prediction while leaving usable gradient over a few
-    # tens of timesteps. (Was 8.0; Phase 1.2.)
+    # Legacy fields kept so older callers / inspectors don't break; the
+    # active dataset.py path (Phase 7) consumes margin_samples only.
     sigma_samples: 10.0
-
-    # Peak value of the Gaussian target.
     peak_value: 1.0
 
-    # Optional margin for expanding the detection region around P/S.
-    # This can be used for binary-style targets (e.g., 1 within ±margin).
-    margin_samples: 5
+    # Half-width of the box on each side of P/S, in samples (100 Hz).
+    # Phase 7: 50 samples = 0.5 s, matching SC `_make_labels`.
+    margin_samples: 50
 
   # Phase picking heads for P and S phases.
   phase:
@@ -116,38 +116,40 @@ augmentation:
   enable: true
 
   # -------------------------
-  # Random time shift  (Phase 2.1)
+  # Random time shift  (Phase 7: REVERTED to SC level)
   # -------------------------
-  # Wide shift is the single biggest generalization gain: forces the model
-  # to learn position-invariance for P/S. Events that get shifted off the
-  # window become naturally label-less (treated as noise) which also
-  # diversifies the negative class.
+  # Phase 2.1 widened this to 3000 samples assuming "more shift = better
+  # generalization"; the SeisConformer code base (which beats EQT on this
+  # dataset) uses 30 samples (0.3 s). The wide setting pushed events
+  # off-window in a large fraction of batches and is now believed to be
+  # the source of the long-tail P/S outliers observed in exp_002.
   random_shift:
     prob: 0.75
-    max_shift_samples: 3000   # was 30 — now ±30s within the 60s window
+    max_shift_samples: 30      # Phase 7: 3000 -> 30 (SC level)
 
   # -------------------------
-  # Additive noise  (Phase 2.2)
+  # Additive noise  (Phase 7: REVERTED to fixed std)
   # -------------------------
-  # Random std per sample (uniform in [a, b]) so the model trains under a
-  # spread of SNR conditions instead of a single fixed noise level.
+  # Phase 2.2 randomized std in [0.05, 0.30]; SC uses fixed std=0.05.
+  # The wider range was over-aggressive on z-score-normalized STEAD and
+  # likely contributed to outlier picks.
   additive_noise:
-    prob: 0.7                  # was 0.5
-    std_range: [0.05, 0.30]    # was std: 0.05  (single fixed value)
+    prob: 0.7
+    std: 0.05                  # Phase 7: single fixed std (SC level)
 
   # -------------------------
-  # Amplitude scaling  (Phase 2.3)
+  # Amplitude scaling  (Phase 7: REVERTED to SC level)
   # -------------------------
   amplitude_scale:
-    prob: 0.5                  # was 0.3
-    min: 0.5                   # was 0.9
-    max: 2.0                   # was 1.1
+    prob: 0.5
+    min: 0.9                   # Phase 7: 0.5 -> 0.9
+    max: 1.1                   # Phase 7: 2.0 -> 1.1
 
   # -------------------------
-  # Channel dropout  (Phase 2.4)
+  # Channel dropout  (Phase 7: REVERTED to SC level)
   # -------------------------
   channel_dropout:
-    prob: 0.2                  # was 0.1
+    prob: 0.1                  # Phase 7: 0.2 -> 0.1
     num_channels_choices: [1]
 
   # -------------------------
@@ -252,10 +254,15 @@ loss:
 
   # Global weights for each head in the final loss:
   #   L_total = w_det * L_det + w_p * L_p + w_s * L_s
+  # Phase 7: match SeisConformer's exact ratio (0.4 / 1.0 / 1.2).
+  # Combined with peak_w=100/150 below, this gives the phase heads a
+  # large enough absolute gradient that the model actually focuses on
+  # the peak instead of the tails. Previous 0.1/0.3/0.4 was an order
+  # of magnitude lower than what SC needed to reach 19 ms P MAE.
   weights:
-    detection: 0.1    # lambda_det
-    p: 0.3            # lambda_P
-    s: 0.4            # lambda_S (slightly higher, as S is harder)
+    detection: 0.4    # lambda_det (Phase 7: was 0.1)
+    p: 1.0            # lambda_P   (Phase 7: was 0.3)
+    s: 1.2            # lambda_S   (Phase 7: was 0.4)
 
   # --------------------------------------------------------------------------
   # Detection head loss: weighted BCE (optionally focal)
@@ -273,15 +280,19 @@ loss:
   # --------------------------------------------------------------------------
   phase:
     loss_type: "masked_peak_mse"
-    # Peak weighting: w_t = 1 + peak_weight_scale * y_phase(t).
-    # 5.0 means the Gaussian-peak timesteps weigh ~6x more than the tail.
-    # (Was 2.0; Phase 1.3.) Bumped to focus learning on peak position; the
-    # gradient-balance budget allows this because phase contributions are
-    # capped by per-sample mask normalization (Phase 1.1).
-    peak_weight_scale: 5.0
+    # Peak weighting: w_t = 1 + peak_weight * y_phase(t).
+    # Phase 7: SeisConformer uses peak_weight=100 for P and 150 for S.
+    # The previous shared scale=5 gave near-zero gradient at the peak,
+    # which is the timestep that determines arrival-time error. The
+    # bounded sigmoid head + per-sample mask normalization keep the
+    # weighted loss numerically stable at this magnitude.
+    p_peak_weight: 100.0          # Phase 7 (SC level)
+    s_peak_weight: 150.0          # Phase 7 (SC level — S harder)
     use_detection_mask: true      # multiply by detection label to focus on event window
     normalize_by_mask: true       # per-sample mask normalization (Phase 1.1)
-    # Clamp predictions to [0, 1] before computing MSE (since labels are in [0, 1])
+    # Phase 7: head activation is now sigmoid (model_config.yaml), so the
+    # clamp is mathematically redundant. Keep it on as a no-op safety
+    # belt (clamping a [0,1] sigmoid output to [0,1] is free).
     clamp_predictions: true
     clamp_min: 0.0
     clamp_max: 1.0
@@ -317,46 +328,60 @@ metrics:
     timestep_threshold: 0.7
 
   # ============================================================================
-  # Phase Picker Settings (P/S Estimation)
+  # Phase Picker Settings (Phase 7: SeisConformer-style multi-criteria)
   # ============================================================================
+  # The previous (Phase 5) union-band + parabolic picker has been replaced
+  # with a direct port of SC's picker.py V7:
+  #   1. Smooth detection trace (sigma=2), adaptive threshold
+  #      mean + 0.3*std, max(base, adaptive).
+  #   2. Find event segments (above-threshold contiguous regions); clip
+  #      any segment longer than max_segment_sec.
+  #   3. Per segment: multi-criteria P search with temporal bonus
+  #      (prefer P within first ~3 s of detection); hybrid S search with
+  #      gradient + P-decay + P-S-gap scoring.
+  #   4. Gaussian-weighted center-of-mass refinement (more stable than
+  #      parabolic at low SNR — verified by SC on STEAD).
   picker:
-    # If true, restrict P/S search region to the dominant connected
-    # detection region (Phase 5 fix). Without this the picker used to
-    # take the union of *all* above-threshold timesteps and routinely
-    # argmax'd inside spurious blips, producing 30-50s phase errors on
-    # the epoch-5 worst cases.
-    use_detection_window: true
+    # Base detection threshold used as floor for the adaptive threshold.
+    det_threshold: 0.5
 
-    # Minimum detection probability for a time sample to be included in the
-    # detection-based search window.
-    det_window_threshold: 0.6
+    # Base P/S amplitude thresholds (used as floor for per-segment
+    # adaptive thresholds via SC's `mean + 0.3*std` rule).
+    p_threshold: 0.25
+    s_threshold: 0.25
 
-    # Soft cap on detection-window half-width. Only kicks in when the
-    # dominant detection component is *wider* than 2 * max_window_half_sec
-    # (pathological over-detection). Normal components are kept verbatim.
-    # STEAD P-S gaps go up to 35s, so 25s either side (=50s total) leaves
-    # plenty of room and never amputates the real P or S position.
-    max_window_half_sec: 25.0
+    # SC's smoothing sigmas for each trace (in samples).
+    smooth_sigma_det: 2.0
+    smooth_sigma_p: 1.0
+    smooth_sigma_s: 1.2
 
-    # Parabolic 3-point fit around the picker argmax. Pushes the median
-    # error below the 1-sample (10ms @ 100Hz) quantization floor.
-    parabolic_refine: true
+    # Adaptive-threshold k: th = max(base, mean + k * std).
+    adaptive_k: 0.3
 
-    # Minimum required Gaussian amplitude for accepting a predicted P or S pick.
-    # If the maximum Gaussian value is below this threshold, the phase is rejected.
-    # P lowered to 0.15 (Phase 5): epoch-5 eval showed P pick_rate 0.91 vs
-    # S 0.99 — model's P Gaussian amplitude is consistently weaker, so 0.25
-    # rejected ~9% of valid P picks. 0.15 still well above noise floor.
-    p_amp_threshold: 0.15
-    s_amp_threshold: 0.15
+    # Event-segmentation parameters (samples / seconds).
+    min_segment_gap_sec: 1.0
+    max_segment_sec: 30.0
 
-    # Optional constraints for stabilizing phase picking.
-    # Minimum allowed P–S time separation in seconds.
-    min_ps_gap_sec: 0.02
+    # Refinement window (+/- samples) for SC's Gaussian-weighted COM refine.
+    refine_window_samples: 3
 
-    # Additional padding (in seconds) around the detection window to expand
-    # the candidate search region for P/S phases.
-    max_search_pad_sec: 0.2
+    # P-search window relative to detection start (seconds).
+    p_search_back_sec: 1.0      # allow P up to 1 s before detection start
+    p_search_forward_sec: 10.0  # search at most 10 s after detection start
+    p_min_distance_sec: 0.2     # minimum peak-distance for find_peaks
+    p_temporal_bonus_3s: 0.3    # bonus if P is within 3 s of detection start
+    p_temporal_bonus_5s: 0.2    # bonus if P is within 5 s of detection start
+    p_temporal_bonus_far: 0.1   # bonus if P is further than 5 s
+
+    # S-search parameters.
+    s_min_distance_sec: 0.3
+    s_search_pad_sec: 5.0       # extend search past detection end by this much
+    min_ps_diff_sec: 0.1
+    max_ps_diff_sec: 40.0
+
+    # Edge guard (samples): reject picks within this many samples of either
+    # window boundary.
+    edge_guard_samples: 100
 
   # ============================================================================
   # Phase Pick Error Tolerances (Used for Reporting Accuracy)
@@ -376,6 +401,12 @@ metrics:
       small: 0.01
       medium: 0.02
       large: 0.05
+
+    # Phase 7: pick-level F1 tolerance. A pick is counted as TP iff
+    # |pred - gt| <= pick_tolerance_sec. EQTransformer's published Table
+    # 2/3 use 0.5 s (50 samples @ 100 Hz); we adopt the same so our
+    # precision/recall/F1 are directly comparable to EQT.
+    pick_tolerance_sec: 0.5
 
   # ============================================================================
   # Evaluation Output Configuration

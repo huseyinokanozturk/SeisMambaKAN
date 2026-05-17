@@ -56,13 +56,22 @@ class SeisMambaKANLoss(nn.Module):
         self.det_focal_gamma: float = float(det_cfg.get("focal_gamma", 2.0))
         self.det_eps: float = float(det_cfg.get("eps", 1.0e-7))
 
-        # Phase loss configuration (shared for P and S)
+        # Phase loss configuration.
+        # Phase 7: peak weight is now per-phase (P=100, S=150 by default,
+        # matching SeisConformer). The old shared `peak_weight_scale` is
+        # still honoured as a fallback so legacy configs don't break:
+        # if `p_peak_weight` / `s_peak_weight` are absent we fall back to
+        # `peak_weight_scale` for both heads.
         phase_cfg = loss_cfg.get("phase", {})
         self.phase_loss_type: str = str(
             phase_cfg.get("loss_type", "masked_peak_mse")
         ).lower()
-        self.phase_peak_weight_scale: float = float(
-            phase_cfg.get("peak_weight_scale", 0.0)
+        legacy_peak_w = float(phase_cfg.get("peak_weight_scale", 0.0))
+        self.p_peak_weight: float = float(
+            phase_cfg.get("p_peak_weight", legacy_peak_w)
+        )
+        self.s_peak_weight: float = float(
+            phase_cfg.get("s_peak_weight", legacy_peak_w)
         )
         self.phase_use_det_mask: bool = bool(
             phase_cfg.get("use_detection_mask", True)
@@ -149,17 +158,19 @@ class SeisMambaKANLoss(nn.Module):
         loss_det = self._compute_detection_loss(det_pred, det_target)
 
         # ------------------------------------------------------------------
-        # Phase losses (P and S)
+        # Phase losses (P and S) — Phase 7: per-phase peak weight
         # ------------------------------------------------------------------
         loss_p = self._compute_phase_loss(
             phase_pred=p_pred,
             phase_target=p_target,
             det_target=det_target,
+            peak_weight=self.p_peak_weight,
         )
         loss_s = self._compute_phase_loss(
             phase_pred=s_pred,
             phase_target=s_target,
             det_target=det_target,
+            peak_weight=self.s_peak_weight,
         )
 
         # ------------------------------------------------------------------
@@ -251,6 +262,7 @@ class SeisMambaKANLoss(nn.Module):
         phase_pred: torch.Tensor,
         phase_target: torch.Tensor,
         det_target: torch.Tensor,
+        peak_weight: float,
     ) -> torch.Tensor:
         """
         Compute phase loss for one head (P or S).
@@ -259,8 +271,9 @@ class SeisMambaKANLoss(nn.Module):
           - Optionally clamp predictions to [clamp_min, clamp_max].
           - Compute squared error (MSE) over time.
           - Weight errors with:
-                w_t = (1 + peak_weight_scale * phase_target[t])
-                if peak_weight_scale > 0, otherwise w_t = 1.
+                w_t = (1 + peak_weight * phase_target[t])
+                if peak_weight > 0, otherwise w_t = 1.
+            `peak_weight` is per-phase in Phase 7 (P=100, S=150).
           - Optionally multiply by detection mask to focus on event window.
           - Per-sample mask normalization: each sample contributes equally to
             the final loss when it has an event window; pure-noise samples
@@ -286,8 +299,8 @@ class SeisMambaKANLoss(nn.Module):
         sq_error = (phase_pred - phase_target) ** 2
 
         # Peak weighting based on target amplitude (B, T)
-        if self.phase_peak_weight_scale > 0.0:
-            weights = 1.0 + self.phase_peak_weight_scale * phase_target
+        if peak_weight > 0.0:
+            weights = 1.0 + peak_weight * phase_target
         else:
             weights = torch.ones_like(phase_target)
 

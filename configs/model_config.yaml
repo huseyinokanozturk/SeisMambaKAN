@@ -139,17 +139,23 @@ heads:
     target: "detection"
     loss: "bce"
 
+  # Phase 7: P/S heads emit sigmoid output, matching SeisConformer.
+  # Targets are in [0, 1] (Gaussian peak == 1.0), so a bounded prediction
+  # both stabilizes the heavily peak-weighted loss (peak_w 100/150) and
+  # makes the post-hoc clamp in losses.py a no-op safety belt.
+  # Detection head stays linear ("none") because BCEWithLogitsLoss
+  # expects logits and is more numerically stable than BCE-on-probs.
   p_gaussian:
     type: "ConvHead1D"
     out_channels: 1
-    activation: "none"
+    activation: "sigmoid"     # Phase 7: was "none"
     target: "p_gaussian"
     loss: "mse"
 
   s_gaussian:
     type: "ConvHead1D"
     out_channels: 1
-    activation: "none"
+    activation: "sigmoid"     # Phase 7: was "none"
     target: "s_gaussian"
     loss: "mse"
 

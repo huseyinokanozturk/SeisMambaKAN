@@ -20,6 +20,10 @@ numpy
 pandas
 h5py
 scikit-learn
+# Phase 7: SeisConformer-style picker uses scipy.ndimage.gaussian_filter1d
+# and scipy.signal.find_peaks. scipy is already a transitive dep of
+# scikit-learn but pinning it here keeps the dependency explicit.
+scipy
 
 # --- Training Monitoring & Progress Tracking ---
 tensorboard
