@@ -246,6 +246,17 @@ Thumbs.db
 # VSCode
 .vscode/
 
-# PyTorch Lightning / WandB / TensorBoard logs 
+# PyTorch Lightning / WandB / TensorBoard logs
 wandb/
 runs/
+
+# Poster / sunum çıktıları (kod tabanının parçası değil)
+poster.html
+poster.pdf
+poster_preview.png
+poster_pdf.js
+logo.png
+steadmap.png
+POSTER_PROMPT.md
+SAVUNMA_SORULARI.md
+.cpdf/
